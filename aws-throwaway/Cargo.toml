@@ -10,19 +10,17 @@ license = "Apache-2.0"
 aws-sdk-ec2 = "0.28.0"
 aws-sdk-iam = "0.28.0"
 aws-config = "0.55.3"
-async-trait.workspace = true
-uuid.workspace = true
-tokio.workspace = true
-anyhow.workspace = true
-tracing.workspace = true
 russh = "0.37.1"
 russh-keys = "0.37.1"
 base64 = "0.21.2"
 ssh-key = { version = "0.5.1", features = ["ed25519"] }
+tokio = { version = "1.25.0", features = ["full", "macros"] }
+anyhow = "1.0.42"
+uuid = { version = "1.0.0", features = ["serde", "v4"] }
+tracing = "0.1.15"
+async-trait = "0.1.30"
 
 [dev-dependencies]
-tracing-subscriber.workspace = true
+tracing-subscriber = { version = "0.3.1", features = ["env-filter", "json"] }
 tracing-appender = "0.2.0"
 clap = { version = "4.0.4", features = ["cargo", "derive"] }
-shellfish = { version = "0.8.0", features = ["async"] }
-rustyline = "11.0.0"

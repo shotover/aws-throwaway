@@ -33,7 +33,7 @@ But two easiest ways are:
 To run `examples/aws-throwaway-example` in this repository, create a script like the following *OUTSIDE* of any repository.
 
 ```bash
-cd shotover-proxy/aws-throwaway
+cd aws-throwaway
 AWS_ACCESS_KEY_ID=TODO AWS_SECRET_ACCESS_KEY=TODO cargo run --example aws-throwaway-example "$@"
 ```
 
