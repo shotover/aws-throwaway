@@ -1,5 +1,9 @@
 # aws-throwaway
 
+[![Crates.io](https://img.shields.io/crates/v/aws-throwaway.svg)](https://crates.io/crates/aws-throwaway)
+[![Docs](https://docs.rs/aws-throwaway/badge.svg)](https://docs.rs/aws-throwaway)
+[![dependency status](https://deps.rs/repo/github/shotover/aws-throwaway/status.svg)](https://deps.rs/repo/github/shotover/aws-throwaway)
+
 An aws-sdk wrapper to spin up temporary resources.
 It was developed for the use case of benchmarking.
 
