@@ -8,36 +8,54 @@ pub struct Ec2Instance {
     public_ip: IpAddr,
     private_ip: IpAddr,
     client_private_key: String,
+    host_public_key_bytes: Vec<u8>,
+    host_public_key: String,
     ssh: SshConnection,
 }
 
 impl Ec2Instance {
+    /// Use this address to connect to this instance from outside of AWS
     pub fn public_ip(&self) -> IpAddr {
         self.public_ip
     }
 
+    /// Use this address to connect to this instance from within AWS
     pub fn private_ip(&self) -> IpAddr {
         self.private_ip
     }
 
+    /// Use this as the private key of your machine when connecting to this instance
     pub fn client_private_key(&self) -> &str {
         &self.client_private_key
     }
 
+    /// Use this for authenticating a host programmatically
+    pub fn host_public_key_bytes(&self) -> &[u8] {
+        &self.host_public_key_bytes
+    }
+
+    /// Insert this into your known_hosts file to avoid errors due to unknown fingerprints
+    pub fn openssh_known_hosts_line(&self) -> String {
+        format!("{} {}", &self.public_ip, &self.host_public_key)
+    }
+
+    /// Returns an object that allows commands to be sent over ssh
     pub fn ssh(&self) -> &SshConnection {
         &self.ssh
     }
 
+    /// Get a list of commands that the user can paste into bash to manually open an ssh connection to this instance.
     pub fn ssh_instructions(&self) -> String {
         format!(
-            r#"
-```
+            r#"```
 chmod 700 key 2> /dev/null || true
 echo '{}' > key
+echo '{}' > known_hosts
 chmod 400 key
-TERM=xterm ssh -i key ubuntu@{}
+TERM=xterm ssh -i key ubuntu@{} -o "UserKnownHostsFile known_hosts"
 ```"#,
             self.client_private_key(),
+            self.openssh_known_hosts_line(),
             self.public_ip()
         )
     }
@@ -46,6 +64,7 @@ TERM=xterm ssh -i key ubuntu@{}
         public_ip: IpAddr,
         private_ip: IpAddr,
         host_public_key_bytes: Vec<u8>,
+        host_public_key: String,
         client_private_key: &str,
     ) -> Self {
         loop {
@@ -88,6 +107,8 @@ TERM=xterm ssh -i key ubuntu@{}
                                 ssh,
                                 public_ip,
                                 private_ip,
+                                host_public_key_bytes,
+                                host_public_key,
                                 client_private_key: client_private_key.to_owned(),
                             };
                         }
