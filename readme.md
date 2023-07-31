@@ -52,7 +52,7 @@ This tracking is stored locally on your machine or in some kind of shared reposi
 This makes sense when you have important production data on the line.
 But when you are working with resources that contain nothing of value and will soon be destroyed, that approach is needlessly brittle and leaves it easy to have costly unaccounted for AWS resources.
 
-Rather than attempting to individually track each resource created like terraform does, aws-throwaway attaches a single user unique [AWS tag](https://docs.aws.amazon.com/tag-editor/latest/userguide/tagging.html) to every resource it creates allowing it destroy all its resources without depending on local state.
+Rather than attempting to individually track each resource created like terraform does, aws-throwaway attaches a single user unique [AWS tag](https://docs.aws.amazon.com/tag-editor/latest/userguide/tagging.html) to every resource it creates allowing it to destroy all its resources without depending on local state.
 
 Consider this snippet from the example earlier:
 
