@@ -333,6 +333,7 @@ sudo systemctl start ssh
             public_ip,
             private_ip,
             self.host_public_key_bytes.clone(),
+            self.host_public_key.clone(),
             &self.client_private_key,
         )
         .await
