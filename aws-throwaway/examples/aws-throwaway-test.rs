@@ -28,7 +28,7 @@ async fn main() {
 
     instance
         .ssh()
-        .push_file(Path::new("README.md"), Path::new("readme.md"))
+        .push_file(Path::new("readme.md"), Path::new("readme.md"))
         .await;
     let mut receiver = instance.ssh().shell_stdout_lines("cat readme.md").await;
     println!();

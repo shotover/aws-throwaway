@@ -9,13 +9,13 @@ description = "An aws-sdk wrapper to spin up temporary resources."
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-aws-sdk-ec2 = "0.28.0"
-aws-sdk-iam = "0.28.0"
-aws-config = "0.55.3"
-russh = "0.37.1"
-russh-keys = "0.37.1"
+aws-sdk-ec2 = "0.29.0"
+aws-sdk-iam = "0.29.0"
+aws-config = "0.56.0"
+russh = "0.38.0"
+russh-keys = "0.38.0"
 base64 = "0.21.2"
-ssh-key = { version = "0.5.1", features = ["ed25519"] }
+ssh-key = { version = "0.6.1", features = ["ed25519"] }
 tokio = { version = "1.25.0", features = ["full", "macros"] }
 anyhow = "1.0.42"
 uuid = { version = "1.0.0", features = ["serde", "v4"] }

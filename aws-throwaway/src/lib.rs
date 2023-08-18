@@ -124,7 +124,7 @@ impl Aws {
             .unwrap());
         tracing::info!("created security group rule");
 
-        let key = PrivateKey::random(OsRng {}, ssh_key::Algorithm::Ed25519).unwrap();
+        let key = PrivateKey::random(&mut OsRng {}, ssh_key::Algorithm::Ed25519).unwrap();
         let host_public_key_bytes = key.public_key().to_bytes().unwrap();
         let host_public_key = key.public_key().to_openssh().unwrap();
         let host_private_key = key.to_openssh(ssh_key::LineEnding::LF).unwrap().to_string();
