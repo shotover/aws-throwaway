@@ -12,7 +12,7 @@ It was developed for the use case of benchmarking.
 aws-throwaway makes it trivial to spin up an instance, interact with it, and then destroy it.
 
 ```rust
-let aws = Aws::new().await;
+let aws = Aws::new(CleanupResources::AllResources).await;
 
 let instance = aws.create_ec2_instance(InstanceType::T2Micro).await;
 let output = instance.ssh().shell("echo 'Hello world!'").await;
@@ -57,7 +57,7 @@ Rather than attempting to individually track each resource created like terrafor
 Consider this snippet from the example earlier:
 
 ```rust
-let aws = Aws::new().await;
+let aws = Aws::new(CleanupResources::AllResources).await;
 let instance = aws.create_ec2_instance().await;
 ```
 
@@ -80,7 +80,7 @@ Even resources created by aws-throwaway by the same user in a different applicat
 
 It is recommended to cleanup your resources at 3 points:
 
-1. When you start your application. This is actually done automatically for you by `Aws::new()`.
+1. When you start your application. This is actually done automatically for you by `Aws::new(..)`.
 2. When your application finishes. You should manually call `aws.cleanup_resources()`
 3. You should provide a cli flag (or similar) in your application that specifically triggers cleanup and nothing else. e.g. `application --cleanup-aws-resources` You can call `Aws::cleanup_resources_static()` to achieve this.
 

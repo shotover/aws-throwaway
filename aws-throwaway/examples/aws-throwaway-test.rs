@@ -1,4 +1,4 @@
-use aws_throwaway::{Aws, InstanceType};
+use aws_throwaway::{Aws, CleanupResources, InstanceType};
 use std::path::Path;
 use tracing_subscriber::EnvFilter;
 
@@ -10,7 +10,7 @@ async fn main() {
         .with_writer(non_blocking)
         .init();
 
-    let aws = Aws::new().await;
+    let aws = Aws::new(CleanupResources::AllResources).await;
     let instance = aws.create_ec2_instance(InstanceType::T2Micro, 8).await;
 
     instance
