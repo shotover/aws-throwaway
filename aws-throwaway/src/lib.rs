@@ -15,7 +15,7 @@ use ssh_key::rand_core::OsRng;
 use ssh_key::PrivateKey;
 use uuid::Uuid;
 
-pub async fn config() -> SdkConfig {
+async fn config() -> SdkConfig {
     let region_provider = RegionProviderChain::first_try(Region::new("us-east-1"));
     aws_config::from_env().region(region_provider).load().await
 }
@@ -188,7 +188,7 @@ impl Aws {
         ids
     }
 
-    pub async fn cleanup_resources_inner(client: &aws_sdk_ec2::Client, user_name: &str) {
+    async fn cleanup_resources_inner(client: &aws_sdk_ec2::Client, user_name: &str) {
         // delete instances
         tracing::info!("Terminating instances");
         let instance_ids = Self::get_all_throwaway_tags(client, user_name, "instance").await;
@@ -355,7 +355,7 @@ impl CpuArch {
 }
 
 fn get_arch_of_instance_type(instance_type: InstanceType) -> CpuArch {
-    // Instance names looke like something like:
+    // Instance names look something like:
     // type + revision_number + subtypes + '.' + size
     // So say for example `Im4gn.large` would be split into:
     // type = "Im"
