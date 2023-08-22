@@ -1,7 +1,9 @@
-use aws_throwaway::{Aws, InstanceType};
+use aws_throwaway::{Aws, CleanupResources, InstanceType};
 use clap::Parser;
 use std::str::FromStr;
 use tracing_subscriber::EnvFilter;
+
+const AWS_THROWAWAY_TAG: &str = "create-instance";
 
 #[tokio::main]
 async fn main() {
@@ -13,12 +15,13 @@ async fn main() {
 
     let args = Args::parse();
     if args.cleanup {
-        Aws::cleanup_resources_static().await;
+        Aws::cleanup_resources_static(CleanupResources::WithAppTag(AWS_THROWAWAY_TAG.to_owned()))
+            .await;
         println!("All AWS throwaway resources have been deleted")
     } else if let Some(instance_type) = args.instance_type {
         println!("Creating instance of type {instance_type}");
 
-        let aws = Aws::new().await;
+        let aws = Aws::new(CleanupResources::WithAppTag(AWS_THROWAWAY_TAG.to_owned())).await;
         let instance_type = InstanceType::from_str(&instance_type).unwrap();
         let instance = aws.create_ec2_instance(instance_type, 20).await;
 
