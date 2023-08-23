@@ -14,7 +14,7 @@ aws-throwaway makes it trivial to spin up an instance, interact with it, and the
 ```rust
 let aws = Aws::new(CleanupResources::AllResources).await;
 
-let instance = aws.create_ec2_instance(InstanceType::T2Micro).await;
+let instance = aws.create_ec2_instance(Ec2InstanceDefinition::new(InstanceType::T2Micro)).await;
 let output = instance.ssh().shell("echo 'Hello world!'").await;
 println!("output from ec2 instance: {}", output.stdout);
 
@@ -58,7 +58,7 @@ Consider this snippet from the example earlier:
 
 ```rust
 let aws = Aws::new(CleanupResources::AllResources).await;
-let instance = aws.create_ec2_instance().await;
+let instance = aws.create_ec2_instance(Ec2InstanceDefinition::new(InstanceType::T2Micro)).await;
 ```
 
 Behind the scenes this creates various kinds of AWS resources. e.g. keypairs, security groups, ec2 instances
