@@ -4,6 +4,7 @@ use tokio::{net::TcpStream, time::Instant};
 
 use crate::ssh::SshConnection;
 
+/// Represents a currently running EC2 instance and provides various methods for interacting with the instance.
 pub struct Ec2Instance {
     public_ip: IpAddr,
     private_ip: IpAddr,

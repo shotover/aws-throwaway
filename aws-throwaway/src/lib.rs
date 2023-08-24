@@ -1,4 +1,6 @@
-pub mod ec2_instance;
+mod cpu_arch;
+mod ec2_instance;
+mod ec2_instance_definition;
 mod iam;
 mod ssh;
 mod tags;
@@ -8,13 +10,14 @@ use aws_config::SdkConfig;
 use aws_sdk_ec2::config::Region;
 use aws_sdk_ec2::types::{BlockDeviceMapping, EbsBlockDevice, KeyType, ResourceType, VolumeType};
 use base64::Engine;
-use ec2_instance::Ec2Instance;
 use ssh_key::rand_core::OsRng;
 use ssh_key::PrivateKey;
 use tags::Tags;
 use uuid::Uuid;
 
 pub use aws_sdk_ec2::types::InstanceType;
+pub use ec2_instance::Ec2Instance;
+pub use ec2_instance_definition::Ec2InstanceDefinition;
 pub use tags::CleanupResources;
 
 async fn config() -> SdkConfig {
@@ -22,6 +25,7 @@ async fn config() -> SdkConfig {
     aws_config::from_env().region(region_provider).load().await
 }
 
+/// Construct this type to create and cleanup aws resources.
 pub struct Aws {
     client: aws_sdk_ec2::Client,
     keyname: String,
@@ -34,6 +38,10 @@ pub struct Aws {
 }
 
 impl Aws {
+    /// Construct a new [`Aws`]
+    ///
+    /// Before returning the [`Aws`], all preexisting resources conforming to the specified [`CleanupResources`] approach are destroyed.
+    /// The specified [`CleanupResources`] is then also used by the [`Aws::cleanup_resources`] method.
     pub async fn new(cleanup: CleanupResources) -> Self {
         let config = config().await;
         let user_name = iam::user_name(&config).await;
@@ -218,22 +226,19 @@ impl Aws {
         }
     }
 
-    pub async fn create_ec2_instance(
-        &self,
-        instance_type: InstanceType,
-        storage_gb: u32,
-    ) -> Ec2Instance {
+    /// Creates a new EC2 instance as defined by [`Ec2InstanceDefinition`]
+    pub async fn create_ec2_instance(&self, definition: Ec2InstanceDefinition) -> Ec2Instance {
         let result = self
             .client
             .run_instances()
-            .instance_type(instance_type.clone())
+            .instance_type(definition.instance_type.clone())
             .min_count(1)
             .max_count(1)
             .block_device_mappings(
                 BlockDeviceMapping::builder().device_name("/dev/sda1").ebs(
                     EbsBlockDevice::builder()
                         .delete_on_termination(true)
-                        .volume_size(storage_gb as i32)
+                        .volume_size(definition.volume_size_gb as i32)
                         .volume_type(VolumeType::Gp2)
                         .build()
                 ).build()
@@ -254,7 +259,7 @@ sudo systemctl start ssh
             .tag_specifications(self.tags.create_tags(ResourceType::Instance, "aws-throwaway"))
             .image_id(format!(
                 "resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/{}/hvm/ebs-gp2/ami-id",
-                get_arch_of_instance_type(instance_type).get_ubuntu_arch_identifier()
+                cpu_arch::get_arch_of_instance_type(definition.instance_type).get_ubuntu_arch_identifier()
             ))
             .send()
             .await
@@ -305,45 +310,4 @@ sudo systemctl start ssh
         )
         .await
     }
-}
-
-enum CpuArch {
-    X86_64,
-    Aarch64,
-}
-
-impl CpuArch {
-    fn get_ubuntu_arch_identifier(&self) -> &'static str {
-        match self {
-            CpuArch::X86_64 => "amd64",
-            CpuArch::Aarch64 => "arm64",
-        }
-    }
-}
-
-fn get_arch_of_instance_type(instance_type: InstanceType) -> CpuArch {
-    // Instance names look something like:
-    // type + revision_number + subtypes + '.' + size
-    // So say for example `Im4gn.large` would be split into:
-    // type = "Im"
-    // revision_number = 4
-    // subtypes = "gn"
-    // size = "large"
-    //
-    // The 'g' character existing in subtypes indicates that the instance type is a gravitron aka arm instance.
-    // We can check for the existence of 'g' to determine if we are aarch64 or x86_64
-    // This is a bit hacky because this format is not explicitly documented anywhere but the instance type naming does consistently follow this pattern.
-    let mut reached_revision_number = false;
-    for c in instance_type.as_str().chars() {
-        if !reached_revision_number {
-            if c.is_ascii_digit() {
-                reached_revision_number = true;
-            }
-        } else if c == '.' {
-            return CpuArch::X86_64;
-        } else if c == 'g' {
-            return CpuArch::Aarch64;
-        }
-    }
-    unreachable!("Cannot parse instance type: {instance_type:?}")
 }

@@ -1,4 +1,4 @@
-use aws_throwaway::{Aws, CleanupResources, InstanceType};
+use aws_throwaway::{Aws, CleanupResources, Ec2InstanceDefinition, InstanceType};
 use clap::Parser;
 use std::str::FromStr;
 use tracing_subscriber::EnvFilter;
@@ -23,7 +23,11 @@ async fn main() {
 
         let aws = Aws::new(CleanupResources::WithAppTag(AWS_THROWAWAY_TAG.to_owned())).await;
         let instance_type = InstanceType::from_str(&instance_type).unwrap();
-        let instance = aws.create_ec2_instance(instance_type, 20).await;
+        let instance = aws
+            .create_ec2_instance(
+                Ec2InstanceDefinition::new(instance_type).volume_size_gigabytes(20),
+            )
+            .await;
 
         let result = instance.ssh().shell("lsb_release -a").await;
         println!("Created instance running:\n{}", result.stdout);
