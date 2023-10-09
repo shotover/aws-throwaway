@@ -46,6 +46,13 @@ impl SshConnection {
         }
     }
 
+    /// Runs a shell command, returning its stdout + stderr when the command finishes.
+    ///
+    /// An informative panic will occur if
+    /// * the process returns a non-zero exit code
+    /// * the process is killed by a signal other than TERM or KILL
+    ///
+    /// This method is recommended for running setup commands that must succeed.
     pub async fn shell(&self, command: &str) -> CommandOutput {
         tracing::info!("running command on {}: {}", self.address, command);
 
@@ -91,11 +98,19 @@ impl SshConnection {
         output
     }
 
-    // Run a service and return its logs over stdout
+    /// Runs a shell command reporting its logs over stdout while it executes.
+    ///
+    /// Every line received is sent to the receiver as a String.
+    ///
+    /// An error will be sent to the receiver if:
+    /// * the process returns a non-zero exit code
+    /// * the process is killed by a signal other than TERM or KILL
+    ///
+    /// This method is recommended for running a long running service or application under test.
     pub async fn shell_stdout_lines(
         &self,
         command: &str,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<String> {
+    ) -> tokio::sync::mpsc::UnboundedReceiver<Result<String>> {
         let task = format!(
             "running shell_stdout_lines on {}: {}",
             self.address, command
@@ -120,7 +135,7 @@ impl SshConnection {
                                         while let Some((until, _)) = stdout.iter().enumerate().find(|(_, c)| **c == b'\n') {
                                             let old = stdout.split_off(until + 1);
                                             stdout.pop(); // remove the '\n'
-                                            if tx.send(String::from_utf8(stdout).unwrap()).is_err() {
+                                            if tx.send(Ok(String::from_utf8(stdout).unwrap())).is_err() {
                                                 return;
                                             }
                                             stdout = old;
@@ -136,7 +151,10 @@ impl SshConnection {
                                     ChannelMsg::ExitStatus { exit_status } => {
                                         if exit_status != 0 {
                                             let stderr = String::from_utf8(stderr.clone()).unwrap();
-                                            tracing::error!("command {command}\nUnexpectedly exited with status {exit_status:?}\nstderr:{stderr}")
+                                            let err = anyhow!("command {command}\nUnexpectedly exited with status {exit_status:?}\nstderr:{stderr}");
+                                            if tx.send(Err(err)).is_err() {
+                                                return;
+                                            }
                                         }
                                     }
                                     ChannelMsg::ExitSignal {
@@ -147,7 +165,10 @@ impl SshConnection {
                                     } => {
                                         if !matches!(signal_name, Sig::TERM | Sig::KILL) {
                                             let stderr = String::from_utf8(stderr.clone()).unwrap();
-                                            tracing::error!("command {command}\nWas unexpectedly killed via signal {signal_name:?} core_dumped={core_dumped}\n{error_message:?}\nstderr:{stderr}")
+                                            let err = anyhow!("command {command}\nWas unexpectedly killed via signal {signal_name:?} core_dumped={core_dumped}\n{error_message:?}\nstderr:{stderr}");
+                                            if tx.send(Err(err)).is_err() {
+                                                return;
+                                            }
                                         }
                                     }
                                     _ => {}
@@ -166,6 +187,7 @@ impl SshConnection {
         rx
     }
 
+    /// Push a file from the local machine to the remote machine
     pub async fn push_file(&self, source: &Path, dest: &Path) {
         let task = format!("pushing file from {source:?} to {}:{dest:?}", self.address);
         tracing::info!("{task}");
@@ -177,6 +199,7 @@ impl SshConnection {
         self.push_file_impl(&task, source, dest).await;
     }
 
+    /// Create a file on the remote machine at `dest` with the provided bytes.
     pub async fn push_file_from_bytes(&self, bytes: &[u8], dest: &Path) {
         let task = format!("pushing raw bytes to {}:{dest:?}", self.address);
         tracing::info!("{task}");
@@ -185,12 +208,7 @@ impl SshConnection {
         self.push_file_impl(&task, source, dest).await;
     }
 
-    pub async fn push_file_impl<R: AsyncReadExt + Unpin>(
-        &self,
-        task: &str,
-        source: R,
-        dest: &Path,
-    ) {
+    async fn push_file_impl<R: AsyncReadExt + Unpin>(&self, task: &str, source: R, dest: &Path) {
         let mut channel = self.session.channel_open_session().await.unwrap();
         let command = format!("dd of='{0}'\nchmod 777 {0}", dest.to_str().unwrap());
         channel.exec(true, command).await.unwrap();
@@ -236,6 +254,7 @@ impl SshConnection {
         check_results(task, failed, status, &output);
     }
 
+    /// Pull a file from the remote machine to the local machine
     pub async fn pull_file(&self, source: &Path, dest: &Path) {
         let task = format!("pulling file from {}:{source:?} to {dest:?}", self.address);
         tracing::info!("{task}");
