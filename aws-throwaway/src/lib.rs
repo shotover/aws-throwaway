@@ -8,7 +8,10 @@ mod tags;
 use aws_config::meta::region::RegionProviderChain;
 use aws_config::SdkConfig;
 use aws_sdk_ec2::config::Region;
-use aws_sdk_ec2::types::{BlockDeviceMapping, EbsBlockDevice, KeyType, ResourceType, VolumeType};
+use aws_sdk_ec2::types::{
+    BlockDeviceMapping, EbsBlockDevice, KeyType, Placement, PlacementStrategy, ResourceType,
+    VolumeType,
+};
 use base64::Engine;
 use ssh_key::rand_core::OsRng;
 use ssh_key::PrivateKey;
@@ -34,6 +37,7 @@ pub struct Aws {
     host_public_key_bytes: Vec<u8>,
     host_private_key: String,
     security_group: String,
+    placement_group: String,
     tags: Tags,
 }
 
@@ -109,6 +113,20 @@ impl Aws {
             .unwrap());
         tracing::info!("created security group rule");
 
+        let placement_group = format!("aws-throwaway-{user_name}-{}", Uuid::new_v4());
+        client
+            .create_placement_group()
+            .group_name(&placement_group)
+            // refer to: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/placement-groups.html
+            // For our current usage spread makes the most sense.
+            .strategy(PlacementStrategy::Spread)
+            .tag_specifications(tags.create_tags(ResourceType::PlacementGroup, "aws-throwaway"))
+            .send()
+            .await
+            .map_err(|e| e.into_service_error())
+            .unwrap();
+        tracing::info!("created placement group");
+
         let key = PrivateKey::random(&mut OsRng {}, ssh_key::Algorithm::Ed25519).unwrap();
         let host_public_key_bytes = key.public_key().to_bytes().unwrap();
         let host_public_key = key.public_key().to_openssh().unwrap();
@@ -122,6 +140,7 @@ impl Aws {
             host_public_key,
             host_private_key,
             security_group,
+            placement_group,
             tags,
         }
     }
@@ -210,6 +229,36 @@ impl Aws {
             }
         }
 
+        // delete placement groups
+        let placement_group_ids =
+            Self::get_all_throwaway_tags(client, tags, "placement-group").await;
+        if !placement_group_ids.is_empty() {
+            // placement groups can not be deleted by id so we must look up their names
+            let placement_groups = client
+                .describe_placement_groups()
+                .set_group_ids(Some(placement_group_ids))
+                .send()
+                .await
+                .map_err(|e| e.into_service_error())
+                .unwrap();
+            for placement_group in placement_groups.placement_groups().unwrap() {
+                let name = placement_group.group_name().unwrap();
+                if let Err(err) = client
+                    .delete_placement_group()
+                    .group_name(name)
+                    .send()
+                    .await
+                {
+                    tracing::info!(
+                    "placement group {name:?} could not be deleted, this will get cleaned up eventually on a future aws-throwaway cleanup: {:?}",
+                    err.into_service_error().meta().message()
+                )
+                } else {
+                    tracing::info!("placement group {name:?} was succesfully deleted",)
+                }
+            }
+        }
+
         // delete keypairs
         for id in Self::get_all_throwaway_tags(client, tags, "key-pair").await {
             client
@@ -232,6 +281,11 @@ impl Aws {
             .client
             .run_instances()
             .instance_type(definition.instance_type.clone())
+            .set_placement(Some(
+                Placement::builder()
+                    .group_name(&self.placement_group)
+                    .build()
+            ))
             .min_count(1)
             .max_count(1)
             .block_device_mappings(
