@@ -23,10 +23,12 @@ async fn main() {
 
         let aws = Aws::new(CleanupResources::WithAppTag(AWS_THROWAWAY_TAG.to_owned())).await;
         let instance_type = InstanceType::from_str(&instance_type).unwrap();
+        let network_interface_count = args.network_interfaces;
         let instance = aws
             .create_ec2_instance(
                 Ec2InstanceDefinition::new(instance_type)
                     .volume_size_gigabytes(20)
+                    .network_interface_count(network_interface_count)
                     .os(args.instance_os.to_aws()),
             )
             .await;
@@ -49,6 +51,9 @@ pub struct Args {
     /// e.g. --instance-type t2.micro
     #[clap(long)]
     pub instance_type: Option<String>,
+
+    #[clap(long, default_value_t = 1)]
+    pub network_interfaces: u32,
 
     #[clap(long)]
     pub instance_os: InstanceOs,

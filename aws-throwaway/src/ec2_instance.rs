@@ -1,8 +1,7 @@
-use std::{net::IpAddr, time::Duration};
-
-use tokio::{net::TcpStream, time::Instant};
-
 use crate::ssh::SshConnection;
+use std::net::{IpAddr, Ipv4Addr};
+use std::time::Duration;
+use tokio::{net::TcpStream, time::Instant};
 
 /// Represents a currently running EC2 instance and provides various methods for interacting with the instance.
 pub struct Ec2Instance {
@@ -12,6 +11,12 @@ pub struct Ec2Instance {
     host_public_key_bytes: Vec<u8>,
     host_public_key: String,
     ssh: SshConnection,
+    network_interfaces: Vec<NetworkInterface>,
+}
+
+pub struct NetworkInterface {
+    pub private_ipv4: Ipv4Addr,
+    pub device_index: i32,
 }
 
 impl Ec2Instance {
@@ -23,6 +28,12 @@ impl Ec2Instance {
     /// Use this address to connect to this instance from within AWS
     pub fn private_ip(&self) -> IpAddr {
         self.private_ip
+    }
+
+    /// List of all network interfaces attached to this instance.
+    /// Includes the primary interface that has the ip returned by [`Ec2Instance::private_ip`] as well as all other interfaces attached to this instance at the time it was created.
+    pub fn network_interfaces(&self) -> &[NetworkInterface] {
+        &self.network_interfaces
     }
 
     /// Use this as the private key of your machine when connecting to this instance
@@ -67,6 +78,7 @@ TERM=xterm ssh -i key ubuntu@{} -o "UserKnownHostsFile known_hosts"
         host_public_key_bytes: Vec<u8>,
         host_public_key: String,
         client_private_key: &str,
+        network_interfaces: Vec<NetworkInterface>,
     ) -> Self {
         loop {
             let start = Instant::now();
@@ -111,6 +123,7 @@ TERM=xterm ssh -i key ubuntu@{} -o "UserKnownHostsFile known_hosts"
                                 host_public_key_bytes,
                                 host_public_key,
                                 client_private_key: client_private_key.to_owned(),
+                                network_interfaces,
                             };
                         }
                     };
