@@ -35,6 +35,7 @@ async fn main() {
     let mut receiver = instance.ssh().shell_stdout_lines("cat readme.md").await;
     println!();
     while let Some(line) = receiver.recv().await {
+        let line = line.unwrap();
         println!("Received: {line}");
     }
 
