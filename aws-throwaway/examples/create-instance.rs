@@ -25,7 +25,9 @@ async fn main() {
         let instance_type = InstanceType::from_str(&instance_type).unwrap();
         let instance = aws
             .create_ec2_instance(
-                Ec2InstanceDefinition::new(instance_type).volume_size_gigabytes(20),
+                Ec2InstanceDefinition::new(instance_type)
+                    .volume_size_gigabytes(20)
+                    .os(args.instance_os.to_aws()),
             )
             .await;
 
@@ -49,5 +51,23 @@ pub struct Args {
     pub instance_type: Option<String>,
 
     #[clap(long)]
+    pub instance_os: InstanceOs,
+
+    #[clap(long)]
     pub cleanup: bool,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy)]
+pub enum InstanceOs {
+    Ubuntu20_04,
+    Ubuntu22_04,
+}
+
+impl InstanceOs {
+    fn to_aws(self) -> aws_throwaway::InstanceOs {
+        match self {
+            InstanceOs::Ubuntu20_04 => aws_throwaway::InstanceOs::Ubuntu20_04,
+            InstanceOs::Ubuntu22_04 => aws_throwaway::InstanceOs::Ubuntu22_04,
+        }
+    }
 }
