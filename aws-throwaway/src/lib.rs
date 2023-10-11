@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 pub use aws_sdk_ec2::types::InstanceType;
 pub use ec2_instance::Ec2Instance;
-pub use ec2_instance_definition::Ec2InstanceDefinition;
+pub use ec2_instance_definition::{Ec2InstanceDefinition, InstanceOs};
 pub use tags::CleanupResources;
 
 async fn config() -> SdkConfig {
@@ -277,6 +277,15 @@ impl Aws {
 
     /// Creates a new EC2 instance as defined by [`Ec2InstanceDefinition`]
     pub async fn create_ec2_instance(&self, definition: Ec2InstanceDefinition) -> Ec2Instance {
+        let ubuntu_version = match definition.os {
+            InstanceOs::Ubuntu20_04 => "20.04",
+            InstanceOs::Ubuntu22_04 => "22.04",
+        };
+        let image_id = format!(
+            "resolve:ssm:/aws/service/canonical/ubuntu/server/{}/stable/current/{}/hvm/ebs-gp2/ami-id",
+            ubuntu_version,
+            cpu_arch::get_arch_of_instance_type(definition.instance_type.clone()).get_ubuntu_arch_identifier()
+        );
         let result = self
             .client
             .run_instances()
@@ -284,18 +293,21 @@ impl Aws {
             .set_placement(Some(
                 Placement::builder()
                     .group_name(&self.placement_group)
-                    .build()
+                    .build(),
             ))
             .min_count(1)
             .max_count(1)
             .block_device_mappings(
-                BlockDeviceMapping::builder().device_name("/dev/sda1").ebs(
-                    EbsBlockDevice::builder()
-                        .delete_on_termination(true)
-                        .volume_size(definition.volume_size_gb as i32)
-                        .volume_type(VolumeType::Gp2)
-                        .build()
-                ).build()
+                BlockDeviceMapping::builder()
+                    .device_name("/dev/sda1")
+                    .ebs(
+                        EbsBlockDevice::builder()
+                            .delete_on_termination(true)
+                            .volume_size(definition.volume_size_gb as i32)
+                            .volume_type(VolumeType::Gp2)
+                            .build(),
+                    )
+                    .build(),
             )
             .security_groups(&self.security_group)
             .key_name(&self.keyname)
@@ -310,11 +322,11 @@ sudo systemctl start ssh
             "#,
                 self.host_public_key, self.host_private_key
             )))
-            .tag_specifications(self.tags.create_tags(ResourceType::Instance, "aws-throwaway"))
-            .image_id(format!(
-                "resolve:ssm:/aws/service/canonical/ubuntu/server/22.04/stable/current/{}/hvm/ebs-gp2/ami-id",
-                cpu_arch::get_arch_of_instance_type(definition.instance_type).get_ubuntu_arch_identifier()
-            ))
+            .tag_specifications(
+                self.tags
+                    .create_tags(ResourceType::Instance, "aws-throwaway"),
+            )
+            .image_id(image_id)
             .send()
             .await
             .map_err(|e| e.into_service_error())
