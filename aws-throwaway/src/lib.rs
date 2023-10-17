@@ -9,19 +9,22 @@ use aws_config::meta::region::RegionProviderChain;
 use aws_config::SdkConfig;
 use aws_sdk_ec2::config::Region;
 use aws_sdk_ec2::types::{
-    BlockDeviceMapping, EbsBlockDevice, KeyType, Placement, PlacementStrategy, ResourceType,
-    VolumeType,
+    BlockDeviceMapping, EbsBlockDevice, Filter, InstanceNetworkInterfaceSpecification, KeyType,
+    Placement, PlacementStrategy, ResourceType, VolumeType,
 };
 use base64::Engine;
 use ssh_key::rand_core::OsRng;
 use ssh_key::PrivateKey;
+use std::time::{Duration, Instant};
 use tags::Tags;
 use uuid::Uuid;
 
 pub use aws_sdk_ec2::types::InstanceType;
-pub use ec2_instance::Ec2Instance;
+pub use ec2_instance::{Ec2Instance, NetworkInterface};
 pub use ec2_instance_definition::{Ec2InstanceDefinition, InstanceOs};
 pub use tags::CleanupResources;
+
+const AZ: &str = "us-east-1c";
 
 async fn config() -> SdkConfig {
     let region_provider = RegionProviderChain::first_try(Region::new("us-east-1"));
@@ -36,8 +39,9 @@ pub struct Aws {
     host_public_key: String,
     host_public_key_bytes: Vec<u8>,
     host_private_key: String,
-    security_group: String,
-    placement_group: String,
+    security_group_id: String,
+    placement_group_name: String,
+    default_subnet_id: String,
     tags: Tags,
 }
 
@@ -73,7 +77,7 @@ impl Aws {
         tracing::info!("client_private_key:\n{}", client_private_key);
 
         let security_group = format!("aws-throwaway-{user_name}-{}", Uuid::new_v4());
-        client
+        let security_group_id = client
             .create_security_group()
             .group_name(&security_group)
             .description("aws-throwaway security group")
@@ -81,6 +85,8 @@ impl Aws {
             .send()
             .await
             .map_err(|e| e.into_service_error())
+            .unwrap()
+            .group_id
             .unwrap();
         tracing::info!("created security group");
         assert!(client
@@ -113,10 +119,10 @@ impl Aws {
             .unwrap());
         tracing::info!("created security group rule");
 
-        let placement_group = format!("aws-throwaway-{user_name}-{}", Uuid::new_v4());
+        let placement_group_name = format!("aws-throwaway-{user_name}-{}", Uuid::new_v4());
         client
             .create_placement_group()
-            .group_name(&placement_group)
+            .group_name(&placement_group_name)
             // refer to: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/placement-groups.html
             // For our current usage spread makes the most sense.
             .strategy(PlacementStrategy::Spread)
@@ -126,6 +132,31 @@ impl Aws {
             .map_err(|e| e.into_service_error())
             .unwrap();
         tracing::info!("created placement group");
+
+        let default_subnet_id = client
+            .describe_subnets()
+            .filters(
+                Filter::builder()
+                    .name("default-for-az")
+                    .values("true")
+                    .build(),
+            )
+            .filters(
+                Filter::builder()
+                    .name("availability-zone")
+                    .values(AZ)
+                    .build(),
+            )
+            .send()
+            .await
+            .map_err(|e| e.into_service_error())
+            .unwrap()
+            .subnets
+            .unwrap()
+            .pop()
+            .unwrap()
+            .subnet_id
+            .unwrap();
 
         let key = PrivateKey::random(&mut OsRng {}, ssh_key::Algorithm::Ed25519).unwrap();
         let host_public_key_bytes = key.public_key().to_bytes().unwrap();
@@ -139,8 +170,9 @@ impl Aws {
             host_public_key_bytes,
             host_public_key,
             host_private_key,
-            security_group,
-            placement_group,
+            security_group_id,
+            placement_group_name,
+            default_subnet_id,
             tags,
         }
     }
@@ -194,7 +226,21 @@ impl Aws {
     }
 
     async fn cleanup_resources_inner(client: &aws_sdk_ec2::Client, tags: &Tags) {
-        // delete instances
+        // release elastic ips
+        for id in Self::get_all_throwaway_tags(client, tags, "elastic-ip").await {
+            client
+                .release_address()
+                .allocation_id(&id)
+                .send()
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!(e.into_service_error())
+                        .context(format!("Failed to release elastic ip {id:?}"))
+                })
+                .unwrap();
+            tracing::info!("elastic ip {id:?} was succesfully deleted");
+        }
+
         tracing::info!("Terminating instances");
         let instance_ids = Self::get_all_throwaway_tags(client, tags, "instance").await;
         if !instance_ids.is_empty() {
@@ -254,7 +300,7 @@ impl Aws {
                     err.into_service_error().meta().message()
                 )
                 } else {
-                    tracing::info!("placement group {name:?} was succesfully deleted",)
+                    tracing::info!("placement group {name:?} was succesfully deleted")
                 }
             }
         }
@@ -277,6 +323,31 @@ impl Aws {
 
     /// Creates a new EC2 instance as defined by [`Ec2InstanceDefinition`]
     pub async fn create_ec2_instance(&self, definition: Ec2InstanceDefinition) -> Ec2Instance {
+        // elastic IP's are a limited resource so only create it if we truly need it.
+        let elastic_ip = if definition.network_interface_count > 1 {
+            Some(
+                self.client
+                    .allocate_address()
+                    .tag_specifications(
+                        self.tags
+                            .create_tags(ResourceType::ElasticIp, "aws-throwaway"),
+                    )
+                    .send()
+                    .await
+                    .map_err(|e| e.into_service_error())
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+
+        // if we specify a list of network interfaces we cannot specify an instance level security group
+        let security_group_ids = if elastic_ip.is_some() {
+            None
+        } else {
+            Some(vec![self.security_group_id.clone()])
+        };
+
         let ubuntu_version = match definition.os {
             InstanceOs::Ubuntu20_04 => "20.04",
             InstanceOs::Ubuntu22_04 => "22.04",
@@ -289,10 +360,11 @@ impl Aws {
         let result = self
             .client
             .run_instances()
-            .instance_type(definition.instance_type.clone())
+            .instance_type(definition.instance_type)
             .set_placement(Some(
                 Placement::builder()
-                    .group_name(&self.placement_group)
+                    .group_name(&self.placement_group_name)
+                    .availability_zone(AZ)
                     .build(),
             ))
             .min_count(1)
@@ -309,7 +381,25 @@ impl Aws {
                     )
                     .build(),
             )
-            .security_groups(&self.security_group)
+            .set_security_group_ids(security_group_ids)
+            .set_network_interfaces(if elastic_ip.is_some() {
+                Some(
+                    (0..definition.network_interface_count)
+                        .map(|i| {
+                            InstanceNetworkInterfaceSpecification::builder()
+                                .delete_on_termination(true)
+                                .device_index(i as i32)
+                                .groups(&self.security_group_id)
+                                .associate_public_ip_address(false)
+                                .subnet_id(&self.default_subnet_id)
+                                .description(i.to_string())
+                                .build()
+                        })
+                        .collect(),
+                )
+            } else {
+                None
+            })
             .key_name(&self.keyname)
             .user_data(base64::engine::general_purpose::STANDARD.encode(format!(
                 r#"#!/bin/bash
@@ -331,17 +421,61 @@ sudo systemctl start ssh
             .await
             .map_err(|e| e.into_service_error())
             .unwrap();
-        let instance_id = result
-            .instances()
+
+        let instance = result.instances().unwrap().first().unwrap();
+        let primary_network_interface_id = instance
+            .network_interfaces
+            .as_ref()
             .unwrap()
             .iter()
-            .next()
+            .find(|x| x.attachment.as_ref().unwrap().device_index.unwrap() == 0)
             .unwrap()
-            .instance_id()
-            .unwrap()
-            .to_owned();
+            .network_interface_id
+            .as_ref()
+            .unwrap();
 
-        let mut public_ip = None;
+        let network_interfaces = instance
+            .network_interfaces
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|x| NetworkInterface {
+                device_index: x.attachment.as_ref().unwrap().device_index.unwrap(),
+                private_ipv4: x.private_ip_address.as_ref().unwrap().parse().unwrap(),
+            })
+            .collect();
+
+        if let Some(elastic_ip) = &elastic_ip {
+            let start = Instant::now();
+            loop {
+                match self
+                    .client
+                    .associate_address()
+                    .allocation_id(elastic_ip.allocation_id.as_ref().unwrap())
+                    .network_interface_id(primary_network_interface_id)
+                    .send()
+                    .await
+                {
+                    Ok(_) => {
+                        break;
+                    }
+                    Err(err) => {
+                        // It is expected to receive the following error if we attempt too early:
+                        // `The pending-instance-running instance to which 'eni-***' is attached is not in a valid state for this operation`
+                        if start.elapsed() > Duration::from_secs(120) {
+                            panic!(
+                                "Received error while assosciating address after 120s retrying: {}",
+                                err.into_service_error()
+                            );
+                        } else {
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut public_ip = elastic_ip.map(|x| x.public_ip.unwrap().parse().unwrap());
         let mut private_ip = None;
 
         while public_ip.is_none() || private_ip.is_none() {
@@ -349,7 +483,7 @@ sudo systemctl start ssh
             for reservation in self
                 .client
                 .describe_instances()
-                .instance_ids(&instance_id)
+                .instance_ids(instance.instance_id().unwrap())
                 .send()
                 .await
                 .map_err(|e| e.into_service_error())
@@ -358,7 +492,9 @@ sudo systemctl start ssh
                 .unwrap()
             {
                 for instance in reservation.instances().unwrap() {
-                    public_ip = instance.public_ip_address().map(|x| x.parse().unwrap());
+                    if public_ip.is_none() {
+                        public_ip = instance.public_ip_address().map(|x| x.parse().unwrap());
+                    }
                     private_ip = instance.private_ip_address().map(|x| x.parse().unwrap());
                 }
             }
@@ -373,6 +509,7 @@ sudo systemctl start ssh
             self.host_public_key_bytes.clone(),
             self.host_public_key.clone(),
             &self.client_private_key,
+            network_interfaces,
         )
         .await
     }
