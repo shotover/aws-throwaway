@@ -41,7 +41,9 @@ jobs:
         # We allow different test_flags to share a cache as they should have identical build outputs
         key: ${{ matrix.runner }} - ${{ matrix.cargo_flags }}
     - name: Install cargo-hack
-      run: cargo install cargo-hack --version 0.5.8
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-hack@0.6.10
     - name: Check `cargo fmt` was run
       run: cargo fmt --all -- --check
     - name: Ensure that all crates compile and have no warnings under every possible combination of features
