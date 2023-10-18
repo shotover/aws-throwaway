@@ -9,8 +9,9 @@ use aws_config::meta::region::RegionProviderChain;
 use aws_config::SdkConfig;
 use aws_sdk_ec2::config::Region;
 use aws_sdk_ec2::types::{
-    BlockDeviceMapping, EbsBlockDevice, Filter, InstanceNetworkInterfaceSpecification, KeyType,
-    Placement, PlacementStrategy, ResourceType, VolumeType,
+    AttributeBooleanValue, BlockDeviceMapping, EbsBlockDevice,
+    InstanceNetworkInterfaceSpecification, IpPermission, KeyType, Placement, PlacementStrategy,
+    ResourceType, UserIdGroupPair, VolumeType,
 };
 use base64::Engine;
 use ssh_key::rand_core::OsRng;
@@ -41,8 +42,13 @@ pub struct Aws {
     host_private_key: String,
     security_group_id: String,
     placement_group_name: String,
-    default_subnet_id: String,
+    subnet_id: String,
     tags: Tags,
+}
+
+struct VpcInfo {
+    subnet_id: String,
+    security_group_id: String,
 }
 
 impl Aws {
@@ -66,12 +72,15 @@ impl Aws {
         // Cleanup any resources that were previously failed to cleanup
         Self::cleanup_resources_inner(&client, &tags).await;
 
-        let (client_private_key, security_group_id, _, default_subnet_id) = tokio::join!(
+        let (client_private_key, _, vpc_info) = tokio::join!(
             Aws::create_key_pair(&client, &tags, &keyname),
-            Aws::create_security_group(&client, &tags, &security_group_name),
             Aws::create_placement_group(&client, &tags, &placement_group_name),
-            Aws::get_default_subnet_id(&client)
+            Aws::create_vpc(&client, &tags, &security_group_name)
         );
+        let VpcInfo {
+            subnet_id,
+            security_group_id,
+        } = vpc_info;
 
         let key = PrivateKey::random(&mut OsRng {}, ssh_key::Algorithm::Ed25519).unwrap();
         let host_public_key_bytes = key.public_key().to_bytes().unwrap();
@@ -87,9 +96,120 @@ impl Aws {
             host_private_key,
             security_group_id,
             placement_group_name,
-            default_subnet_id,
+            subnet_id,
             tags,
         }
+    }
+
+    async fn create_vpc(
+        client: &aws_sdk_ec2::Client,
+        tags: &Tags,
+        security_group_name: &str,
+    ) -> VpcInfo {
+        let vpc = client
+            .create_vpc()
+            .cidr_block("10.0.0.0/16")
+            .tag_specifications(tags.create_tags(ResourceType::Vpc, "aws-throwaway"))
+            .send()
+            .await
+            .map_err(|e| e.into_service_error())
+            .unwrap();
+        let vpc_id = vpc.vpc.unwrap().vpc_id.unwrap();
+        tracing::info!("Created VPC");
+
+        let (subnet_id, security_group_id) = tokio::join!(
+            Aws::create_subnet(client, tags, &vpc_id),
+            Aws::create_security_group(client, tags, security_group_name, &vpc_id)
+        );
+
+        VpcInfo {
+            subnet_id,
+            security_group_id,
+        }
+    }
+
+    async fn create_subnet(client: &aws_sdk_ec2::Client, tags: &Tags, vpc_id: &str) -> String {
+        let subnet = client
+            .create_subnet()
+            .vpc_id(vpc_id)
+            .availability_zone(AZ)
+            .cidr_block("10.0.16.0/20")
+            .tag_specifications(tags.create_tags(ResourceType::Subnet, "aws-throwaway"))
+            .send()
+            .await
+            .map_err(|e| e.into_service_error())
+            .unwrap();
+        let subnet_id = subnet.subnet.unwrap().subnet_id.unwrap();
+        tracing::info!("Created subnet");
+
+        client
+            .modify_subnet_attribute()
+            .subnet_id(&subnet_id)
+            .map_public_ip_on_launch(AttributeBooleanValue::builder().value(true).build())
+            .send()
+            .await
+            .map_err(|e| e.into_service_error())
+            .unwrap();
+        tracing::info!("Configured subnet");
+
+        let route_table_id = Aws::create_route_table(client, tags, vpc_id).await;
+
+        client
+            .associate_route_table()
+            .subnet_id(&subnet_id)
+            .route_table_id(route_table_id)
+            .send()
+            .await
+            .map_err(|e| e.into_service_error())
+            .unwrap();
+        tracing::info!("Associated route table to subnet");
+        subnet_id
+    }
+
+    async fn create_route_table(client: &aws_sdk_ec2::Client, tags: &Tags, vpc_id: &str) -> String {
+        let route_table = client
+            .create_route_table()
+            .vpc_id(vpc_id)
+            .tag_specifications(tags.create_tags(ResourceType::RouteTable, "aws-throwaway"))
+            .send()
+            .await
+            .map_err(|e| e.into_service_error())
+            .unwrap();
+        let route_table_id = route_table.route_table.unwrap().route_table_id.unwrap();
+
+        let internet_gateway = client
+            .create_internet_gateway()
+            .tag_specifications(tags.create_tags(ResourceType::InternetGateway, "aws-throwaway"))
+            .send()
+            .await
+            .map_err(|e| e.into_service_error())
+            .unwrap();
+        let internet_gateway_id = internet_gateway
+            .internet_gateway
+            .unwrap()
+            .internet_gateway_id
+            .unwrap();
+        client
+            .attach_internet_gateway()
+            .internet_gateway_id(&internet_gateway_id)
+            .vpc_id(vpc_id)
+            .send()
+            .await
+            .map_err(|e| e.into_service_error())
+            .unwrap();
+
+        client
+            .create_route()
+            .route_table_id(&route_table_id)
+            .gateway_id(internet_gateway_id)
+            .destination_cidr_block("0.0.0.0/0")
+            .send()
+            .await
+            .map_err(|e| e.into_service_error())
+            .unwrap();
+
+        tracing::info!("Created route table");
+        route_table_id
     }
 
     async fn create_key_pair(client: &aws_sdk_ec2::Client, tags: &Tags, name: &str) -> String {
@@ -111,9 +231,11 @@ impl Aws {
         client: &aws_sdk_ec2::Client,
         tags: &Tags,
         name: &str,
+        vpc_id: &str,
     ) -> String {
         let security_group_id = client
             .create_security_group()
+            .vpc_id(vpc_id)
             .group_name(name)
             .description("aws-throwaway security group")
             .tag_specifications(tags.create_tags(ResourceType::SecurityGroup, "aws-throwaway"))
@@ -126,8 +248,8 @@ impl Aws {
         tracing::info!("created security group");
 
         tokio::join!(
-            Aws::create_ingress_rule_internal(client, tags, name),
-            Aws::create_ingress_rule_ssh(client, tags, name),
+            Aws::create_ingress_rule_internal(client, tags, &security_group_id),
+            Aws::create_ingress_rule_ssh(client, tags, &security_group_id),
         );
 
         security_group_id
@@ -136,12 +258,17 @@ impl Aws {
     async fn create_ingress_rule_internal(
         client: &aws_sdk_ec2::Client,
         tags: &Tags,
-        group_name: &str,
+        group_id: &str,
     ) {
         assert!(client
             .authorize_security_group_ingress()
-            .group_name(group_name)
-            .source_security_group_name(group_name)
+            .group_id(group_id)
+            .ip_permissions(
+                IpPermission::builder()
+                    .user_id_group_pairs(UserIdGroupPair::builder().group_id(group_id).build())
+                    .ip_protocol("-1")
+                    .build()
+            )
             .tag_specifications(
                 tags.create_tags(ResourceType::SecurityGroupRule, "within aws-throwaway SG")
             )
@@ -154,10 +281,10 @@ impl Aws {
         tracing::info!("created security group rule - internal");
     }
 
-    async fn create_ingress_rule_ssh(client: &aws_sdk_ec2::Client, tags: &Tags, group_name: &str) {
+    async fn create_ingress_rule_ssh(client: &aws_sdk_ec2::Client, tags: &Tags, group_id: &str) {
         assert!(client
             .authorize_security_group_ingress()
-            .group_name(group_name)
+            .group_id(group_id)
             .ip_protocol("tcp")
             .from_port(22)
             .to_port(22)
@@ -185,33 +312,6 @@ impl Aws {
             .map_err(|e| e.into_service_error())
             .unwrap();
         tracing::info!("created placement group");
-    }
-
-    async fn get_default_subnet_id(client: &aws_sdk_ec2::Client) -> String {
-        client
-            .describe_subnets()
-            .filters(
-                Filter::builder()
-                    .name("default-for-az")
-                    .values("true")
-                    .build(),
-            )
-            .filters(
-                Filter::builder()
-                    .name("availability-zone")
-                    .values(AZ)
-                    .build(),
-            )
-            .send()
-            .await
-            .map_err(|e| e.into_service_error())
-            .unwrap()
-            .subnets
-            .unwrap()
-            .pop()
-            .unwrap()
-            .subnet_id
-            .unwrap()
     }
 
     /// Call before dropping [`Aws`]
@@ -263,21 +363,6 @@ impl Aws {
     }
 
     async fn cleanup_resources_inner(client: &aws_sdk_ec2::Client, tags: &Tags) {
-        // release elastic ips
-        for id in Self::get_all_throwaway_tags(client, tags, "elastic-ip").await {
-            client
-                .release_address()
-                .allocation_id(&id)
-                .send()
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(e.into_service_error())
-                        .context(format!("Failed to release elastic ip {id:?}"))
-                })
-                .unwrap();
-            tracing::info!("elastic ip {id:?} was succesfully deleted");
-        }
-
         tracing::info!("Terminating instances");
         let instance_ids = Self::get_all_throwaway_tags(client, tags, "instance").await;
         if !instance_ids.is_empty() {
@@ -300,11 +385,109 @@ impl Aws {
             }
         }
 
+        // release elastic ips
+        for id in Self::get_all_throwaway_tags(client, tags, "elastic-ip").await {
+            loop {
+                // TODO: add timeout
+                match client
+                    .release_address()
+                    .allocation_id(&id)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(e.into_service_error())
+                            .context(format!("Failed to release elastic ip {id:?}"))
+                    }) {
+                    Ok(_) => break,
+                    Err(err) => {
+                        tracing::info!("elastic ip failed to release, maybe its ec2 instance is still shutting down, retrying, error was: {err}");
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                }
+            }
+            tracing::info!("elastic ip {id:?} was succesfully deleted");
+        }
+
         tokio::join!(
-            Aws::delete_security_groups(client, tags),
+            Aws::delete_subnet_and_vpc(client, tags),
             Aws::delete_placement_groups(client, tags),
             Aws::delete_keypairs(client, tags),
         );
+    }
+
+    async fn delete_subnet_and_vpc(client: &aws_sdk_ec2::Client, tags: &Tags) {
+        Aws::delete_security_groups(client, tags).await;
+
+        for id in Self::get_all_throwaway_tags(client, tags, "subnet").await {
+            if let Err(err) = client.delete_subnet().subnet_id(&id).send().await {
+                tracing::info!(
+                    "subnet {id:?} could not be deleted, this will get cleaned up eventually on a future aws-throwaway cleanup: {:?}",
+                    err.into_service_error().meta().message()
+                )
+            } else {
+                tracing::info!("subnet {id:?} was succesfully deleted")
+            }
+        }
+
+        let vpc_ids = Self::get_all_throwaway_tags(client, tags, "vpc").await;
+        for id in &vpc_ids {
+            Aws::delete_internet_gateway(client, tags, id).await;
+        }
+
+        for id in Self::get_all_throwaway_tags(client, tags, "route-table").await {
+            if let Err(err) = client.delete_route_table().route_table_id(&id).send().await {
+                tracing::info!(
+                    "route table {id:?} could not be deleted, this will get cleaned up eventually on a future aws-throwaway cleanup: {:?}",
+                    err.into_service_error().meta().message()
+                )
+            } else {
+                tracing::info!("route table {id:?} was succesfully deleted")
+            }
+        }
+
+        for id in vpc_ids {
+            if let Err(err) = client.delete_vpc().vpc_id(&id).send().await {
+                tracing::info!(
+                    "vpc {id:?} could not be deleted, this will get cleaned up eventually on a future aws-throwaway cleanup: {:?}",
+                    err.into_service_error().meta().message()
+                )
+            } else {
+                tracing::info!("vpc {id:?} was succesfully deleted")
+            }
+        }
+    }
+
+    async fn delete_internet_gateway(client: &aws_sdk_ec2::Client, tags: &Tags, vpc_id: &str) {
+        for id in Self::get_all_throwaway_tags(client, tags, "internet-gateway").await {
+            println!("{id}");
+            if let Err(err) = client
+                .detach_internet_gateway()
+                .internet_gateway_id(&id)
+                .vpc_id(vpc_id)
+                .send()
+                .await
+                .map_err(|e| e.into_service_error())
+            {
+                // gateway might have been left unattached due to partial init or partial destruction
+                tracing::info!("Failed to detach gateway {err:?}")
+            }
+
+            // TODO: actual deletion could be parallel with vps deletion
+            //       or maybe search for an internet gateway instead of creating from scratch and then deleting
+            if let Err(err) = client
+                .delete_internet_gateway()
+                .internet_gateway_id(&id)
+                .send()
+                .await
+            {
+                tracing::info!(
+                    "internet gateway {id:?} could not be deleted, this will get cleaned up eventually on a future aws-throwaway cleanup: {:?}",
+                    err.into_service_error().meta().message()
+                )
+            } else {
+                tracing::info!("internet gateway {id:?} was succesfully deleted")
+            }
+        }
     }
 
     async fn delete_security_groups(client: &aws_sdk_ec2::Client, tags: &Tags) {
@@ -315,7 +498,7 @@ impl Aws {
                     err.into_service_error().meta().message()
                 )
             } else {
-                tracing::info!("security group {id:?} was succesfully deleted",)
+                tracing::info!("security group {id:?} was succesfully deleted")
             }
         }
     }
@@ -415,6 +598,11 @@ impl Aws {
             ))
             .min_count(1)
             .max_count(1)
+            .set_subnet_id(if elastic_ip.is_some() {
+                None
+            } else {
+                Some(self.subnet_id.to_owned())
+            })
             .block_device_mappings(
                 BlockDeviceMapping::builder()
                     .device_name("/dev/sda1")
@@ -437,7 +625,7 @@ impl Aws {
                                 .device_index(i as i32)
                                 .groups(&self.security_group_id)
                                 .associate_public_ip_address(false)
-                                .subnet_id(&self.default_subnet_id)
+                                .subnet_id(&self.subnet_id)
                                 .description(i.to_string())
                                 .build()
                         })
