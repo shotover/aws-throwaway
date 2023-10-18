@@ -300,7 +300,14 @@ impl Aws {
             }
         }
 
-        // delete security groups
+        tokio::join!(
+            Aws::delete_security_groups(client, tags),
+            Aws::delete_placement_groups(client, tags),
+            Aws::delete_keypairs(client, tags),
+        );
+    }
+
+    async fn delete_security_groups(client: &aws_sdk_ec2::Client, tags: &Tags) {
         for id in Self::get_all_throwaway_tags(client, tags, "security-group").await {
             if let Err(err) = client.delete_security_group().group_id(&id).send().await {
                 tracing::info!(
@@ -311,8 +318,9 @@ impl Aws {
                 tracing::info!("security group {id:?} was succesfully deleted",)
             }
         }
+    }
 
-        // delete placement groups
+    async fn delete_placement_groups(client: &aws_sdk_ec2::Client, tags: &Tags) {
         let placement_group_ids =
             Self::get_all_throwaway_tags(client, tags, "placement-group").await;
         if !placement_group_ids.is_empty() {
@@ -341,8 +349,9 @@ impl Aws {
                 }
             }
         }
+    }
 
-        // delete keypairs
+    async fn delete_keypairs(client: &aws_sdk_ec2::Client, tags: &Tags) {
         for id in Self::get_all_throwaway_tags(client, tags, "key-pair").await {
             client
                 .delete_key_pair()
