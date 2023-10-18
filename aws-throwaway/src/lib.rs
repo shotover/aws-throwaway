@@ -54,6 +54,8 @@ impl Aws {
         let config = config().await;
         let user_name = iam::user_name(&config).await;
         let keyname = format!("aws-throwaway-{user_name}-{}", Uuid::new_v4());
+        let security_group_name = format!("aws-throwaway-{user_name}-{}", Uuid::new_v4());
+        let placement_group_name = format!("aws-throwaway-{user_name}-{}", Uuid::new_v4());
         let client = aws_sdk_ec2::Client::new(&config);
 
         let tags = Tags {
@@ -64,9 +66,36 @@ impl Aws {
         // Cleanup any resources that were previously failed to cleanup
         Self::cleanup_resources_inner(&client, &tags).await;
 
+        let (client_private_key, security_group_id, _, default_subnet_id) = tokio::join!(
+            Aws::create_key_pair(&client, &tags, &keyname),
+            Aws::create_security_group(&client, &tags, &security_group_name),
+            Aws::create_placement_group(&client, &tags, &placement_group_name),
+            Aws::get_default_subnet_id(&client)
+        );
+
+        let key = PrivateKey::random(&mut OsRng {}, ssh_key::Algorithm::Ed25519).unwrap();
+        let host_public_key_bytes = key.public_key().to_bytes().unwrap();
+        let host_public_key = key.public_key().to_openssh().unwrap();
+        let host_private_key = key.to_openssh(ssh_key::LineEnding::LF).unwrap().to_string();
+
+        Aws {
+            client,
+            keyname,
+            client_private_key,
+            host_public_key_bytes,
+            host_public_key,
+            host_private_key,
+            security_group_id,
+            placement_group_name,
+            default_subnet_id,
+            tags,
+        }
+    }
+
+    async fn create_key_pair(client: &aws_sdk_ec2::Client, tags: &Tags, name: &str) -> String {
         let keypair = client
             .create_key_pair()
-            .key_name(&keyname)
+            .key_name(name)
             .key_type(KeyType::Ed25519)
             .tag_specifications(tags.create_tags(ResourceType::KeyPair, "aws-throwaway"))
             .send()
@@ -75,11 +104,17 @@ impl Aws {
             .unwrap();
         let client_private_key = keypair.key_material().unwrap().to_string();
         tracing::info!("client_private_key:\n{}", client_private_key);
+        client_private_key
+    }
 
-        let security_group = format!("aws-throwaway-{user_name}-{}", Uuid::new_v4());
+    async fn create_security_group(
+        client: &aws_sdk_ec2::Client,
+        tags: &Tags,
+        name: &str,
+    ) -> String {
         let security_group_id = client
             .create_security_group()
-            .group_name(&security_group)
+            .group_name(name)
             .description("aws-throwaway security group")
             .tag_specifications(tags.create_tags(ResourceType::SecurityGroup, "aws-throwaway"))
             .send()
@@ -89,10 +124,24 @@ impl Aws {
             .group_id
             .unwrap();
         tracing::info!("created security group");
+
+        tokio::join!(
+            Aws::create_ingress_rule_internal(client, tags, name),
+            Aws::create_ingress_rule_ssh(client, tags, name),
+        );
+
+        security_group_id
+    }
+
+    async fn create_ingress_rule_internal(
+        client: &aws_sdk_ec2::Client,
+        tags: &Tags,
+        group_name: &str,
+    ) {
         assert!(client
             .authorize_security_group_ingress()
-            .group_name(&security_group)
-            .source_security_group_name(&security_group)
+            .group_name(group_name)
+            .source_security_group_name(group_name)
             .tag_specifications(
                 tags.create_tags(ResourceType::SecurityGroupRule, "within aws-throwaway SG")
             )
@@ -102,10 +151,13 @@ impl Aws {
             .unwrap()
             .r#return()
             .unwrap());
-        tracing::info!("created security group rule");
+        tracing::info!("created security group rule - internal");
+    }
+
+    async fn create_ingress_rule_ssh(client: &aws_sdk_ec2::Client, tags: &Tags, group_name: &str) {
         assert!(client
             .authorize_security_group_ingress()
-            .group_name(&security_group)
+            .group_name(group_name)
             .ip_protocol("tcp")
             .from_port(22)
             .to_port(22)
@@ -117,12 +169,13 @@ impl Aws {
             .unwrap()
             .r#return()
             .unwrap());
-        tracing::info!("created security group rule");
+        tracing::info!("created security group rule - ssh");
+    }
 
-        let placement_group_name = format!("aws-throwaway-{user_name}-{}", Uuid::new_v4());
+    async fn create_placement_group(client: &aws_sdk_ec2::Client, tags: &Tags, name: &str) {
         client
             .create_placement_group()
-            .group_name(&placement_group_name)
+            .group_name(name)
             // refer to: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/placement-groups.html
             // For our current usage spread makes the most sense.
             .strategy(PlacementStrategy::Spread)
@@ -132,8 +185,10 @@ impl Aws {
             .map_err(|e| e.into_service_error())
             .unwrap();
         tracing::info!("created placement group");
+    }
 
-        let default_subnet_id = client
+    async fn get_default_subnet_id(client: &aws_sdk_ec2::Client) -> String {
+        client
             .describe_subnets()
             .filters(
                 Filter::builder()
@@ -156,25 +211,7 @@ impl Aws {
             .pop()
             .unwrap()
             .subnet_id
-            .unwrap();
-
-        let key = PrivateKey::random(&mut OsRng {}, ssh_key::Algorithm::Ed25519).unwrap();
-        let host_public_key_bytes = key.public_key().to_bytes().unwrap();
-        let host_public_key = key.public_key().to_openssh().unwrap();
-        let host_private_key = key.to_openssh(ssh_key::LineEnding::LF).unwrap().to_string();
-
-        Aws {
-            client,
-            keyname,
-            client_private_key,
-            host_public_key_bytes,
-            host_public_key,
-            host_private_key,
-            security_group_id,
-            placement_group_name,
-            default_subnet_id,
-            tags,
-        }
+            .unwrap()
     }
 
     /// Call before dropping [`Aws`]
@@ -263,7 +300,14 @@ impl Aws {
             }
         }
 
-        // delete security groups
+        tokio::join!(
+            Aws::delete_security_groups(client, tags),
+            Aws::delete_placement_groups(client, tags),
+            Aws::delete_keypairs(client, tags),
+        );
+    }
+
+    async fn delete_security_groups(client: &aws_sdk_ec2::Client, tags: &Tags) {
         for id in Self::get_all_throwaway_tags(client, tags, "security-group").await {
             if let Err(err) = client.delete_security_group().group_id(&id).send().await {
                 tracing::info!(
@@ -274,8 +318,9 @@ impl Aws {
                 tracing::info!("security group {id:?} was succesfully deleted",)
             }
         }
+    }
 
-        // delete placement groups
+    async fn delete_placement_groups(client: &aws_sdk_ec2::Client, tags: &Tags) {
         let placement_group_ids =
             Self::get_all_throwaway_tags(client, tags, "placement-group").await;
         if !placement_group_ids.is_empty() {
@@ -304,8 +349,9 @@ impl Aws {
                 }
             }
         }
+    }
 
-        // delete keypairs
+    async fn delete_keypairs(client: &aws_sdk_ec2::Client, tags: &Tags) {
         for id in Self::get_all_throwaway_tags(client, tags, "key-pair").await {
             client
                 .delete_key_pair()
