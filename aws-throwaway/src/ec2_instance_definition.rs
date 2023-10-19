@@ -6,6 +6,7 @@ pub struct Ec2InstanceDefinition {
     pub(crate) volume_size_gb: u32,
     pub(crate) network_interface_count: u32,
     pub(crate) os: InstanceOs,
+    pub(crate) ami: Option<String>,
 }
 
 impl Ec2InstanceDefinition {
@@ -16,6 +17,7 @@ impl Ec2InstanceDefinition {
             volume_size_gb: 8,
             network_interface_count: 1,
             os: InstanceOs::Ubuntu22_04,
+            ami: None,
         }
     }
 
@@ -41,6 +43,17 @@ impl Ec2InstanceDefinition {
     // Defaults to `Ubuntu 22.04`
     pub fn os(mut self, os: InstanceOs) -> Self {
         self.os = os;
+        self
+    }
+
+    /// Override the AMI used.
+    /// When used together with the `os` setting, the os setting is used to determine how to configure the instance while the specified AMI is used as the instances image.
+    /// Defaults to None which indicates that the appropriate AMI should be looked up via SSM.
+    ///
+    /// This option is useful when you have custom variation of the configured OS or if your user does not have access to SSM.
+    /// AMI's are region specific so be careful in picking your AMI.
+    pub fn override_ami(mut self, ami: Option<String>) -> Self {
+        self.ami = ami;
         self
     }
 }
