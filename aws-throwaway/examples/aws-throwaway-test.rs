@@ -10,7 +10,7 @@ async fn main() {
         .with_writer(non_blocking)
         .init();
 
-    let aws = Aws::new(CleanupResources::AllResources).await;
+    let aws = Aws::builder(CleanupResources::AllResources).build().await;
     let instance = aws
         .create_ec2_instance(Ec2InstanceDefinition::new(InstanceType::T2Micro))
         .await;
@@ -22,11 +22,17 @@ async fn main() {
 
     let result = instance.ssh().shell("xxd some_remote_file").await;
     println!("The bytes of the remote file:\n{}", result.stdout);
+
+    // download a file and assert on its contents
     instance
         .ssh()
         .pull_file(Path::new("some_remote_file"), Path::new("some_local_file"))
         .await;
-    println!("Remote file copied locally to some_local_file");
+    assert_eq!(
+        std::fs::read_to_string("some_local_file").unwrap(),
+        "some string\n"
+    );
+    std::fs::remove_file("some_local_file").unwrap();
 
     instance
         .ssh()

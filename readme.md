@@ -12,7 +12,7 @@ It was developed for the use case of benchmarking.
 aws-throwaway makes it trivial to spin up an instance, interact with it, and then destroy it.
 
 ```rust
-let aws = Aws::new(CleanupResources::AllResources).await;
+let aws = Aws::builder(CleanupResources::AllResources).build().await;
 
 let instance = aws.create_ec2_instance(Ec2InstanceDefinition::new(InstanceType::T2Micro)).await;
 let output = instance.ssh().shell("echo 'Hello world!'").await;
@@ -57,7 +57,7 @@ Rather than attempting to individually track each resource created like terrafor
 Consider this snippet from the example earlier:
 
 ```rust
-let aws = Aws::new(CleanupResources::AllResources).await;
+let aws = Aws::builder(CleanupResources::AllResources).build().await;
 let instance = aws.create_ec2_instance(Ec2InstanceDefinition::new(InstanceType::T2Micro)).await;
 ```
 
