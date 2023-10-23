@@ -10,7 +10,7 @@ async fn main() {
         .init();
 
     println!("Creating instances");
-    let aws = Aws::new(CleanupResources::AllResources).await;
+    let aws = Aws::builder(CleanupResources::AllResources).build().await;
     let (instance1, instance2) = tokio::join!(
         aws.create_ec2_instance(Ec2InstanceDefinition::new(InstanceType::T2Small)),
         aws.create_ec2_instance(

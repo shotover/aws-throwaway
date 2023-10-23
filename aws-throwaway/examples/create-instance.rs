@@ -21,7 +21,9 @@ async fn main() {
     } else if let Some(instance_type) = args.instance_type {
         println!("Creating instance of type {instance_type}");
 
-        let aws = Aws::new(CleanupResources::WithAppTag(AWS_THROWAWAY_TAG.to_owned())).await;
+        let aws = Aws::builder(CleanupResources::WithAppTag(AWS_THROWAWAY_TAG.to_owned()))
+            .build()
+            .await;
         let instance_type = InstanceType::from_str(&instance_type).unwrap();
         let network_interface_count = args.network_interfaces;
         let instance = aws

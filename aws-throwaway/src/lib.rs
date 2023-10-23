@@ -31,26 +31,34 @@ async fn config() -> SdkConfig {
     aws_config::from_env().region(region_provider).load().await
 }
 
-/// Construct this type to create and cleanup aws resources.
-pub struct Aws {
-    client: aws_sdk_ec2::Client,
-    keyname: String,
-    client_private_key: String,
-    host_public_key: String,
-    host_public_key_bytes: Vec<u8>,
-    host_private_key: String,
-    security_group_id: String,
-    placement_group_name: String,
-    default_subnet_id: String,
-    tags: Tags,
+pub struct AwsBuilder {
+    cleanup: CleanupResources,
+    use_public_addresses: bool,
 }
 
-impl Aws {
-    /// Construct a new [`Aws`]
+/// The default configuration will succeed for an AMI user with sufficient access and unmodified default vpcs/subnets
+/// Consider altering the configuration if:
+/// * you want to reduce the amount of access required by the user
+/// * you want to connect directly from within the VPC
+/// * you have already created a specific VPC, subnet or security group that you want aws-throwaway to make use of.
+// TODO: document minimum required access for default configuration.
+impl AwsBuilder {
+    /// When set to:
+    /// * true - aws-throwaway will connect to the public ip of the instances that it creates.
+    ///     + The subnet must have the property MapPublicIpOnLaunch set to true (the unmodified default subnet meets this requirement)
+    ///     + Elastic IPs will be created for instances with multiple network interfaces because AWS does not assign a public IP in that scenario
+    /// * false - aws-throwaway will connect to the private ip of the instances that it creates.
+    ///     + aws-throwaway must be running on a machine within the VPC used by aws-throwaaway or a VPN must be used to connect to the VPC or another similar setup.
     ///
-    /// Before returning the [`Aws`], all preexisting resources conforming to the specified [`CleanupResources`] approach are destroyed.
-    /// The specified [`CleanupResources`] is then also used by the [`Aws::cleanup_resources`] method.
-    pub async fn new(cleanup: CleanupResources) -> Self {
+    /// If the subnet used has MapPublicIpOnLaunch=true then all instances will be publically accessible regardless of this use_public_addresses field.
+    ///
+    /// The default is `true`.
+    pub fn use_public_addresses(mut self, use_public_addresses: bool) -> Self {
+        self.use_public_addresses = use_public_addresses;
+        self
+    }
+
+    pub async fn build(self) -> Aws {
         let config = config().await;
         let user_name = iam::user_name(&config).await;
         let keyname = format!("aws-throwaway-{user_name}-{}", Uuid::new_v4());
@@ -60,11 +68,11 @@ impl Aws {
 
         let tags = Tags {
             user_name: user_name.clone(),
-            cleanup,
+            cleanup: self.cleanup,
         };
 
         // Cleanup any resources that were previously failed to cleanup
-        Self::cleanup_resources_inner(&client, &tags).await;
+        Aws::cleanup_resources_inner(&client, &tags).await;
 
         let (client_private_key, security_group_id, _, default_subnet_id) = tokio::join!(
             Aws::create_key_pair(&client, &tags, &keyname),
@@ -78,7 +86,10 @@ impl Aws {
         let host_public_key = key.public_key().to_openssh().unwrap();
         let host_private_key = key.to_openssh(ssh_key::LineEnding::LF).unwrap().to_string();
 
+        let use_public_addresses = self.use_public_addresses;
+
         Aws {
+            use_public_addresses,
             client,
             keyname,
             client_private_key,
@@ -89,6 +100,34 @@ impl Aws {
             placement_group_name,
             default_subnet_id,
             tags,
+        }
+    }
+}
+
+/// Construct this type to create and cleanup aws resources.
+pub struct Aws {
+    client: aws_sdk_ec2::Client,
+    keyname: String,
+    client_private_key: String,
+    host_public_key: String,
+    host_public_key_bytes: Vec<u8>,
+    host_private_key: String,
+    security_group_id: String,
+    placement_group_name: String,
+    default_subnet_id: String,
+    use_public_addresses: bool,
+    tags: Tags,
+}
+
+impl Aws {
+    /// Returns an [`AwsBuilder`] that will build a new [`Aws`].
+    ///
+    /// Before building the [`Aws`], all preexisting resources conforming to the specified [`CleanupResources`] approach are destroyed.
+    /// The specified [`CleanupResources`] is then also used by the [`Aws::cleanup_resources`] method.
+    pub fn builder(cleanup: CleanupResources) -> AwsBuilder {
+        AwsBuilder {
+            cleanup,
+            use_public_addresses: true,
         }
     }
 
@@ -370,7 +409,7 @@ impl Aws {
     /// Creates a new EC2 instance as defined by [`Ec2InstanceDefinition`]
     pub async fn create_ec2_instance(&self, definition: Ec2InstanceDefinition) -> Ec2Instance {
         // elastic IP's are a limited resource so only create it if we truly need it.
-        let elastic_ip = if definition.network_interface_count > 1 {
+        let elastic_ip = if self.use_public_addresses && definition.network_interface_count > 1 {
             Some(
                 self.client
                     .allocate_address()
@@ -388,10 +427,10 @@ impl Aws {
         };
 
         // if we specify a list of network interfaces we cannot specify an instance level security group
-        let security_group_ids = if elastic_ip.is_some() {
-            None
-        } else {
+        let security_group_ids = if definition.network_interface_count == 1 {
             Some(vec![self.security_group_id.clone()])
+        } else {
+            None
         };
 
         let ubuntu_version = match definition.os {
@@ -428,7 +467,9 @@ impl Aws {
                     .build(),
             )
             .set_security_group_ids(security_group_ids)
-            .set_network_interfaces(if elastic_ip.is_some() {
+            .set_network_interfaces(if definition.network_interface_count == 1 {
+                None
+            } else {
                 Some(
                     (0..definition.network_interface_count)
                         .map(|i| {
@@ -436,6 +477,7 @@ impl Aws {
                                 .delete_on_termination(true)
                                 .device_index(i as i32)
                                 .groups(&self.security_group_id)
+                                // must be false when launching with multiple network interfaces
                                 .associate_public_ip_address(false)
                                 .subnet_id(&self.default_subnet_id)
                                 .description(i.to_string())
@@ -443,8 +485,6 @@ impl Aws {
                         })
                         .collect(),
                 )
-            } else {
-                None
             })
             .key_name(&self.keyname)
             .user_data(base64::engine::general_purpose::STANDARD.encode(format!(
@@ -510,7 +550,7 @@ sudo systemctl start ssh
                         // `The pending-instance-running instance to which 'eni-***' is attached is not in a valid state for this operation`
                         if start.elapsed() > Duration::from_secs(120) {
                             panic!(
-                                "Received error while assosciating address after 120s retrying: {}",
+                                "Received error while associating address after 120s retrying: {}",
                                 err.into_service_error()
                             );
                         } else {
@@ -524,8 +564,17 @@ sudo systemctl start ssh
         let mut public_ip = elastic_ip.map(|x| x.public_ip.unwrap().parse().unwrap());
         let mut private_ip = None;
 
-        while public_ip.is_none() || private_ip.is_none() {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        // TODO: when we support custom subnets we will need the user to set this or query AWS for it.
+        let subnet_assigns_public_ips = true;
+
+        let public_ip_expected = self.use_public_addresses || subnet_assigns_public_ips;
+
+        if public_ip_expected {
+            tracing::info!("Waiting for instance private ip and public ip to be assigned");
+        } else {
+            tracing::info!("Waiting for instance private ip to be assigned");
+        }
+        while (public_ip_expected && public_ip.is_none()) || private_ip.is_none() {
             for reservation in self
                 .client
                 .describe_instances()
@@ -544,12 +593,19 @@ sudo systemctl start ssh
                     private_ip = instance.private_ip_address().map(|x| x.parse().unwrap());
                 }
             }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
-        let public_ip = public_ip.unwrap();
+
         let private_ip = private_ip.unwrap();
-        tracing::info!("created EC2 instance at: {public_ip}");
+        let connect_ip = if self.use_public_addresses {
+            public_ip.unwrap()
+        } else {
+            private_ip
+        };
+        tracing::info!("created EC2 instance at public:{public_ip:?} private:{private_ip}");
 
         Ec2Instance::new(
+            connect_ip,
             public_ip,
             private_ip,
             self.host_public_key_bytes.clone(),

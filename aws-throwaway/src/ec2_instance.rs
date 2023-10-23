@@ -5,7 +5,8 @@ use tokio::{net::TcpStream, time::Instant};
 
 /// Represents a currently running EC2 instance and provides various methods for interacting with the instance.
 pub struct Ec2Instance {
-    public_ip: IpAddr,
+    connect_ip: IpAddr,
+    public_ip: Option<IpAddr>,
     private_ip: IpAddr,
     client_private_key: String,
     host_public_key_bytes: Vec<u8>,
@@ -21,7 +22,7 @@ pub struct NetworkInterface {
 
 impl Ec2Instance {
     /// Use this address to connect to this instance from outside of AWS
-    pub fn public_ip(&self) -> IpAddr {
+    pub fn public_ip(&self) -> Option<IpAddr> {
         self.public_ip
     }
 
@@ -48,7 +49,7 @@ impl Ec2Instance {
 
     /// Insert this into your known_hosts file to avoid errors due to unknown fingerprints
     pub fn openssh_known_hosts_line(&self) -> String {
-        format!("{} {}", &self.public_ip, &self.host_public_key)
+        format!("{} {}", &self.connect_ip, &self.host_public_key)
     }
 
     /// Returns an object that allows commands to be sent over ssh
@@ -68,12 +69,14 @@ TERM=xterm ssh -i key ubuntu@{} -o "UserKnownHostsFile known_hosts"
 ```"#,
             self.client_private_key(),
             self.openssh_known_hosts_line(),
-            self.public_ip()
+            self.connect_ip
         )
     }
 
+    /// It is gauranteed that public_ip will be Some if use_public_address is true
     pub(crate) async fn new(
-        public_ip: IpAddr,
+        connect_ip: IpAddr,
+        public_ip: Option<IpAddr>,
         private_ip: IpAddr,
         host_public_key_bytes: Vec<u8>,
         host_public_key: String,
@@ -85,24 +88,27 @@ TERM=xterm ssh -i key ubuntu@{} -o "UserKnownHostsFile known_hosts"
             // We retry many times before we are able to succesfully make an ssh connection.
             // Each error is expected and so is logged as a `info!` that describes the underlying startup process that is supposed to cause the error.
             // A numbered comment is left before each `info!` to demonstrate the order each error occurs in.
-            match tokio::time::timeout(Duration::from_secs(10), TcpStream::connect((public_ip, 22)))
-                .await
+            match tokio::time::timeout(
+                Duration::from_secs(10),
+                TcpStream::connect((connect_ip, 22)),
+            )
+            .await
             {
                 Err(_) => {
                     // 1.
-                    tracing::info!("Timed out connecting to {public_ip} over ssh, the host is probably not accessible yet, retrying");
+                    tracing::info!("Timed out connecting to {connect_ip} over ssh, the host is probably not accessible yet, retrying");
                     continue;
                 }
                 Ok(Err(e)) => {
                     // 2.
-                    tracing::info!("failed to connect to {public_ip}:22, the host probably hasnt started their ssh service yet, retrying, error was {e}");
+                    tracing::info!("failed to connect to {connect_ip}:22, the host probably hasnt started their ssh service yet, retrying, error was {e}");
                     tokio::time::sleep_until(start + Duration::from_secs(1)).await;
                     continue;
                 }
                 Ok(Ok(stream)) => {
                     match SshConnection::new(
                         stream,
-                        public_ip,
+                        connect_ip,
                         host_public_key_bytes.clone(),
                         client_private_key,
                     )
@@ -117,6 +123,7 @@ TERM=xterm ssh -i key ubuntu@{} -o "UserKnownHostsFile known_hosts"
                         // 4. Then finally we have a working ssh connection.
                         Ok(ssh) => {
                             break Ec2Instance {
+                                connect_ip,
                                 ssh,
                                 public_ip,
                                 private_ip,
