@@ -10,7 +10,7 @@ use aws_config::SdkConfig;
 use aws_sdk_ec2::config::Region;
 use aws_sdk_ec2::types::{
     BlockDeviceMapping, EbsBlockDevice, Filter, InstanceNetworkInterfaceSpecification, KeyType,
-    Placement, PlacementStrategy, ResourceType, VolumeType,
+    Placement, PlacementStrategy, ResourceType, Subnet, VolumeType,
 };
 use base64::Engine;
 use ssh_key::rand_core::OsRng;
@@ -34,6 +34,9 @@ async fn config() -> SdkConfig {
 pub struct AwsBuilder {
     cleanup: CleanupResources,
     use_public_addresses: bool,
+    vpc_id: Option<String>,
+    subnet_id: Option<String>,
+    security_group_id: Option<String>,
 }
 
 /// The default configuration will succeed for an AMI user with sufficient access and unmodified default vpcs/subnets
@@ -41,13 +44,17 @@ pub struct AwsBuilder {
 /// * you want to reduce the amount of access required by the user
 /// * you want to connect directly from within the VPC
 /// * you have already created a specific VPC, subnet or security group that you want aws-throwaway to make use of.
+///
+/// All resources will be created in us-east-1c.
+/// This is hardcoded so that aws-throawaway only has to look into one region when cleaning up.
+/// All instances are created in a single spread placement group in a single AZ to ensure consistent latency between instances.
 // TODO: document minimum required access for default configuration.
 impl AwsBuilder {
     /// When set to:
-    /// * true - aws-throwaway will connect to the public ip of the instances that it creates.
+    /// * true => aws-throwaway will connect to the public ip of the instances that it creates.
     ///     + The subnet must have the property MapPublicIpOnLaunch set to true (the unmodified default subnet meets this requirement)
     ///     + Elastic IPs will be created for instances with multiple network interfaces because AWS does not assign a public IP in that scenario
-    /// * false - aws-throwaway will connect to the private ip of the instances that it creates.
+    /// * false => aws-throwaway will connect to the private ip of the instances that it creates.
     ///     + aws-throwaway must be running on a machine within the VPC used by aws-throwaaway or a VPN must be used to connect to the VPC or another similar setup.
     ///
     /// If the subnet used has MapPublicIpOnLaunch=true then all instances will be publically accessible regardless of this use_public_addresses field.
@@ -55,6 +62,36 @@ impl AwsBuilder {
     /// The default is `true`.
     pub fn use_public_addresses(mut self, use_public_addresses: bool) -> Self {
         self.use_public_addresses = use_public_addresses;
+        self
+    }
+
+    /// * Some(_) => All resources will go into the specified vpc
+    /// * None => All resources will go into the default vpc
+    ///
+    /// The default is `None`
+    pub fn use_vpc_id(mut self, vpc_id: Option<String>) -> Self {
+        self.vpc_id = vpc_id;
+        self
+    }
+
+    /// * Some(_) => All instances will go into the specified subnet
+    /// * None => All instances will go into the default subnet for the specified or default vpc
+    ///
+    /// The default is `None`
+    pub fn use_subnet_id(mut self, subnet_id: Option<String>) -> Self {
+        self.subnet_id = subnet_id;
+        self
+    }
+
+    /// * Some(_) => All instances will use the specified security group
+    /// * None => A single security group will be created for all instances to use. It will allow:
+    ///      + ssh traffic in from the internet
+    ///      + all traffic out to the internet
+    ///      + all traffic in+out between instances in the security group, i.e. all ec2 instances created by this [`Aws`] instance
+    ///
+    /// The default is `None`
+    pub fn use_security_group_id(mut self, security_group_id: Option<String>) -> Self {
+        self.security_group_id = security_group_id;
         self
     }
 
@@ -74,12 +111,21 @@ impl AwsBuilder {
         // Cleanup any resources that were previously failed to cleanup
         Aws::cleanup_resources_inner(&client, &tags).await;
 
-        let (client_private_key, security_group_id, _, default_subnet_id) = tokio::join!(
+        let (client_private_key, security_group_id, _, subnet) = tokio::join!(
             Aws::create_key_pair(&client, &tags, &keyname),
-            Aws::create_security_group(&client, &tags, &security_group_name),
+            Aws::create_security_group(
+                &client,
+                &tags,
+                &security_group_name,
+                &self.vpc_id,
+                self.security_group_id
+            ),
             Aws::create_placement_group(&client, &tags, &placement_group_name),
-            Aws::get_default_subnet_id(&client)
+            Aws::get_subnet(&client, self.subnet_id)
         );
+
+        let subnet_id = subnet.subnet_id.unwrap();
+        let subnet_map_public_ip_on_launch = subnet.map_public_ip_on_launch.unwrap();
 
         let key = PrivateKey::random(&mut OsRng {}, ssh_key::Algorithm::Ed25519).unwrap();
         let host_public_key_bytes = key.public_key().to_bytes().unwrap();
@@ -98,7 +144,8 @@ impl AwsBuilder {
             host_private_key,
             security_group_id,
             placement_group_name,
-            default_subnet_id,
+            subnet_id,
+            subnet_map_public_ip_on_launch,
             tags,
         }
     }
@@ -114,7 +161,8 @@ pub struct Aws {
     host_private_key: String,
     security_group_id: String,
     placement_group_name: String,
-    default_subnet_id: String,
+    subnet_id: String,
+    subnet_map_public_ip_on_launch: bool,
     use_public_addresses: bool,
     tags: Tags,
 }
@@ -128,6 +176,9 @@ impl Aws {
         AwsBuilder {
             cleanup,
             use_public_addresses: true,
+            vpc_id: None,
+            subnet_id: None,
+            security_group_id: None,
         }
     }
 
@@ -150,26 +201,35 @@ impl Aws {
         client: &aws_sdk_ec2::Client,
         tags: &Tags,
         name: &str,
+        vpc_id: &Option<String>,
+        security_group_id: Option<String>,
     ) -> String {
-        let security_group_id = client
-            .create_security_group()
-            .group_name(name)
-            .description("aws-throwaway security group")
-            .tag_specifications(tags.create_tags(ResourceType::SecurityGroup, "aws-throwaway"))
-            .send()
-            .await
-            .map_err(|e| e.into_service_error())
-            .unwrap()
-            .group_id
-            .unwrap();
-        tracing::info!("created security group");
+        match security_group_id {
+            Some(id) => id,
+            None => {
+                let security_group_id = client
+                    .create_security_group()
+                    .group_name(name)
+                    .set_vpc_id(vpc_id.clone())
+                    .description("aws-throwaway security group")
+                    .tag_specifications(
+                        tags.create_tags(ResourceType::SecurityGroup, "aws-throwaway"),
+                    )
+                    .send()
+                    .await
+                    .map_err(|e| e.into_service_error())
+                    .unwrap()
+                    .group_id
+                    .unwrap();
+                tracing::info!("created security group");
 
-        tokio::join!(
-            Aws::create_ingress_rule_internal(client, tags, name),
-            Aws::create_ingress_rule_ssh(client, tags, name),
-        );
-
-        security_group_id
+                tokio::join!(
+                    Aws::create_ingress_rule_internal(client, tags, name),
+                    Aws::create_ingress_rule_ssh(client, tags, name),
+                );
+                security_group_id
+            }
+        }
     }
 
     async fn create_ingress_rule_internal(
@@ -226,31 +286,37 @@ impl Aws {
         tracing::info!("created placement group");
     }
 
-    async fn get_default_subnet_id(client: &aws_sdk_ec2::Client) -> String {
-        client
-            .describe_subnets()
-            .filters(
+    async fn get_subnet(client: &aws_sdk_ec2::Client, subnet_id: Option<String>) -> Subnet {
+        match subnet_id {
+            Some(subnet_id) => client.describe_subnets().filters(
                 Filter::builder()
-                    .name("default-for-az")
-                    .values("true")
+                    .name("subnet-id")
+                    .values(subnet_id)
                     .build(),
-            )
-            .filters(
-                Filter::builder()
-                    .name("availability-zone")
-                    .values(AZ)
-                    .build(),
-            )
-            .send()
-            .await
-            .map_err(|e| e.into_service_error())
-            .unwrap()
-            .subnets
-            .unwrap()
-            .pop()
-            .unwrap()
-            .subnet_id
-            .unwrap()
+            ),
+            None => client
+                .describe_subnets()
+                .filters(
+                    Filter::builder()
+                        .name("default-for-az")
+                        .values("true")
+                        .build(),
+                )
+                .filters(
+                    Filter::builder()
+                        .name("availability-zone")
+                        .values(AZ)
+                        .build(),
+                ),
+        }
+        .send()
+        .await
+        .map_err(|e| e.into_service_error())
+        .unwrap()
+        .subnets
+        .unwrap()
+        .pop()
+        .unwrap()
     }
 
     /// Call before dropping [`Aws`]
@@ -354,7 +420,7 @@ impl Aws {
                     err.into_service_error().meta().message()
                 )
             } else {
-                tracing::info!("security group {id:?} was succesfully deleted",)
+                tracing::info!("security group {id:?} was succesfully deleted")
             }
         }
     }
@@ -392,7 +458,7 @@ impl Aws {
 
     async fn delete_keypairs(client: &aws_sdk_ec2::Client, tags: &Tags) {
         for id in Self::get_all_throwaway_tags(client, tags, "key-pair").await {
-            client
+            if let Err(err) = client
                 .delete_key_pair()
                 .key_pair_id(&id)
                 .send()
@@ -401,8 +467,11 @@ impl Aws {
                     anyhow::anyhow!(e.into_service_error())
                         .context(format!("Failed to delete keypair {id:?}"))
                 })
-                .unwrap();
-            tracing::info!("keypair {id:?} was succesfully deleted");
+            {
+                tracing::error!("keypair {id:?} could not be deleted: {err}");
+            } else {
+                tracing::info!("keypair {id:?} was succesfully deleted");
+            }
         }
     }
 
@@ -437,11 +506,11 @@ impl Aws {
             InstanceOs::Ubuntu20_04 => "20.04",
             InstanceOs::Ubuntu22_04 => "22.04",
         };
-        let image_id = format!(
+        let image_id = definition.ami.unwrap_or_else(|| format!(
             "resolve:ssm:/aws/service/canonical/ubuntu/server/{}/stable/current/{}/hvm/ebs-gp2/ami-id",
             ubuntu_version,
             cpu_arch::get_arch_of_instance_type(definition.instance_type.clone()).get_ubuntu_arch_identifier()
-        );
+        ));
         let result = self
             .client
             .run_instances()
@@ -452,6 +521,11 @@ impl Aws {
                     .availability_zone(AZ)
                     .build(),
             ))
+            .set_subnet_id(if elastic_ip.is_some() {
+                None
+            } else {
+                Some(self.subnet_id.to_owned())
+            })
             .min_count(1)
             .max_count(1)
             .block_device_mappings(
@@ -479,7 +553,7 @@ impl Aws {
                                 .groups(&self.security_group_id)
                                 // must be false when launching with multiple network interfaces
                                 .associate_public_ip_address(false)
-                                .subnet_id(&self.default_subnet_id)
+                                .subnet_id(&self.subnet_id)
                                 .description(i.to_string())
                                 .build()
                         })
@@ -564,10 +638,7 @@ sudo systemctl start ssh
         let mut public_ip = elastic_ip.map(|x| x.public_ip.unwrap().parse().unwrap());
         let mut private_ip = None;
 
-        // TODO: when we support custom subnets we will need the user to set this or query AWS for it.
-        let subnet_assigns_public_ips = true;
-
-        let public_ip_expected = self.use_public_addresses || subnet_assigns_public_ips;
+        let public_ip_expected = self.use_public_addresses || self.subnet_map_public_ip_on_launch;
 
         if public_ip_expected {
             tracing::info!("Waiting for instance private ip and public ip to be assigned");
