@@ -5,9 +5,11 @@ mod iam;
 mod ssh;
 mod tags;
 
+use anyhow::anyhow;
 use aws_config::meta::region::RegionProviderChain;
 use aws_config::SdkConfig;
 use aws_sdk_ec2::config::Region;
+use aws_sdk_ec2::error::ProvideErrorMetadata;
 use aws_sdk_ec2::types::{
     BlockDeviceMapping, EbsBlockDevice, Filter, InstanceNetworkInterfaceSpecification, KeyType,
     Placement, PlacementStrategy, ResourceType, Subnet, VolumeType,
@@ -458,17 +460,16 @@ impl Aws {
 
     async fn delete_keypairs(client: &aws_sdk_ec2::Client, tags: &Tags) {
         for id in Self::get_all_throwaway_tags(client, tags, "key-pair").await {
-            if let Err(err) = client
-                .delete_key_pair()
-                .key_pair_id(&id)
-                .send()
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(e.into_service_error())
-                        .context(format!("Failed to delete keypair {id:?}"))
-                })
-            {
-                tracing::error!("keypair {id:?} could not be deleted: {err}");
+            if let Err(err) = client.delete_key_pair().key_pair_id(&id).send().await {
+                let err = err.into_service_error();
+                if err.code() == Some("UnauthorizedOperation") {
+                    tracing::error!("{:?}", anyhow!(err).context(format!(
+                        "Did not have permissions to delete keypair {id:?}, skipping all other keypairs since they will also fail."
+                    )));
+                    return;
+                } else {
+                    panic!("Failed to delete keypair {id:?}: {err:?}")
+                }
             } else {
                 tracing::info!("keypair {id:?} was succesfully deleted");
             }
