@@ -522,10 +522,10 @@ impl Aws {
                     .availability_zone(AZ)
                     .build(),
             ))
-            .set_subnet_id(if elastic_ip.is_some() {
-                None
-            } else {
+            .set_subnet_id(if definition.network_interface_count == 1 {
                 Some(self.subnet_id.to_owned())
+            } else {
+                None
             })
             .min_count(1)
             .max_count(1)
