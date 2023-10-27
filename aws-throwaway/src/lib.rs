@@ -7,9 +7,9 @@ mod tags;
 
 use anyhow::anyhow;
 use aws_config::meta::region::RegionProviderChain;
+use aws_config::retry::ProvideErrorKind;
 use aws_config::SdkConfig;
 use aws_sdk_ec2::config::Region;
-use aws_sdk_ec2::error::ProvideErrorMetadata;
 use aws_sdk_ec2::types::{
     BlockDeviceMapping, EbsBlockDevice, Filter, InstanceNetworkInterfaceSpecification, KeyType,
     Placement, PlacementStrategy, ResourceType, Subnet, VolumeType,
@@ -647,25 +647,37 @@ sudo systemctl start ssh
             tracing::info!("Waiting for instance private ip to be assigned");
         }
         while (public_ip_expected && public_ip.is_none()) || private_ip.is_none() {
-            for reservation in self
+            // There is no way the instance will be ready in 1 second,
+            // so sleep before trying and then after all future attempts
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+            let instance = self
                 .client
                 .describe_instances()
                 .instance_ids(instance.instance_id().unwrap())
                 .send()
                 .await
-                .map_err(|e| e.into_service_error())
-                .unwrap()
-                .reservations()
-                .unwrap()
-            {
-                for instance in reservation.instances().unwrap() {
-                    if public_ip.is_none() {
-                        public_ip = instance.public_ip_address().map(|x| x.parse().unwrap());
+                .map_err(|e| e.into_service_error());
+            match instance {
+                Ok(instance) => {
+                    for reservation in instance.reservations().unwrap() {
+                        for instance in reservation.instances().unwrap() {
+                            if public_ip.is_none() {
+                                public_ip =
+                                    instance.public_ip_address().map(|x| x.parse().unwrap());
+                            }
+                            private_ip = instance.private_ip_address().map(|x| x.parse().unwrap());
+                        }
                     }
-                    private_ip = instance.private_ip_address().map(|x| x.parse().unwrap());
+                }
+                Err(err) => {
+                    // InvalidInstanceID.NotFound can occur when we query too soon after creating the instance,
+                    // so we need to retry when we hit that
+                    if err.code() != Some("InvalidInstanceID.NotFound") {
+                        panic!("Failed to describe instance {err:?}");
+                    }
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
 
         let private_ip = private_ip.unwrap();
