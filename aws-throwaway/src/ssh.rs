@@ -5,12 +5,9 @@ use russh::{
     ChannelMsg, Sig,
 };
 use russh_keys::{key::PublicKey, PublicKeyBase64};
+use russh_sftp::{client::SftpSession, protocol::OpenFlags};
 use std::{fmt::Display, io::Write, net::IpAddr, path::Path, sync::Arc};
-use tokio::{
-    fs::File,
-    io::{AsyncReadExt, BufReader},
-    net::TcpStream,
-};
+use tokio::{fs::File, io::AsyncReadExt, net::TcpStream};
 
 pub struct SshConnection {
     address: IpAddr,
@@ -192,11 +189,35 @@ impl SshConnection {
         let task = format!("pushing file from {source:?} to {}:{dest:?}", self.address);
         tracing::info!("{task}");
 
-        let source = File::open(source)
+        let mut channel = self.session.channel_open_session().await.unwrap();
+        channel.request_subsystem(true, "sftp").await.unwrap();
+        let sftp = SftpSession::new(channel.into_stream()).await.unwrap();
+        let mut file = sftp
+            .open_with_flags(
+                dest.to_str().unwrap(),
+                OpenFlags::WRITE | OpenFlags::TRUNCATE | OpenFlags::CREATE,
+            )
+            .await
+            .unwrap();
+
+        let mut source = File::open(source)
             .await
             .map_err(|e| anyhow!(e).context(format!("Failed to read from {source:?}")))
             .unwrap();
-        self.push_file_impl(&task, source, dest).await;
+
+        let mut bytes = vec![0u8; 1024 * 1024];
+        loop {
+            let read_count = source
+                .read(&mut bytes[..])
+                .await
+                .unwrap_or_else(|e| panic!("{task} failed to read from local disk with {e:?}"));
+            if read_count == 0 {
+                break;
+            }
+            tokio::io::AsyncWriteExt::write_all(&mut file, &bytes[0..read_count])
+                .await
+                .unwrap_or_else(|e| panic!("{task} failed to write to remote server with {e:?}"));
+        }
     }
 
     /// Create a file on the remote machine at `dest` with the provided bytes.
@@ -204,54 +225,19 @@ impl SshConnection {
         let task = format!("pushing raw bytes to {}:{dest:?}", self.address);
         tracing::info!("{task}");
 
-        let source = BufReader::new(bytes);
-        self.push_file_impl(&task, source, dest).await;
-    }
-
-    async fn push_file_impl<R: AsyncReadExt + Unpin>(&self, task: &str, source: R, dest: &Path) {
         let mut channel = self.session.channel_open_session().await.unwrap();
-        let command = format!("dd of='{0}'\nchmod 777 {0}", dest.to_str().unwrap());
-        channel.exec(true, command).await.unwrap();
-
-        let mut stdout = vec![];
-        let mut stderr = vec![];
-        let mut status = None;
-        let mut failed = None;
-        channel.data(source).await.unwrap();
-        channel.eof().await.unwrap();
-        while let Some(msg) = channel.wait().await {
-            match msg {
-                ChannelMsg::Data { data } => stdout.write_all(&data).unwrap(),
-                ChannelMsg::ExtendedData { data, ext } => {
-                    if ext == 1 {
-                        stderr.write_all(&data).unwrap()
-                    } else {
-                        tracing::warn!("received unknown extended data with extension type {ext} containing: {:?}", data.to_vec())
-                    }
-                }
-                ChannelMsg::ExitStatus { exit_status } => {
-                    status = Some(exit_status);
-                    // cant exit immediately, there might be more data still
-                }
-                ChannelMsg::ExitSignal {
-                    signal_name,
-                    core_dumped,
-                    error_message,
-                    ..
-                } => {
-                    failed = Some(format!(
-                    "killed via signal {signal_name:?} core_dumped={core_dumped} {error_message:?}"
-                ))
-                }
-                _ => {}
-            }
-        }
-        let output = CommandOutput {
-            stdout: String::from_utf8(stdout).unwrap(),
-            stderr: String::from_utf8(stderr).unwrap(),
-        };
-
-        check_results(task, failed, status, &output);
+        channel.request_subsystem(true, "sftp").await.unwrap();
+        let sftp = SftpSession::new(channel.into_stream()).await.unwrap();
+        let mut file = sftp
+            .open_with_flags(
+                dest.to_str().unwrap(),
+                OpenFlags::WRITE | OpenFlags::TRUNCATE | OpenFlags::CREATE,
+            )
+            .await
+            .unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut file, bytes)
+            .await
+            .unwrap_or_else(|e| panic!("{task} failed to write to remote server with {e:?}"));
     }
 
     /// Pull a file from the remote machine to the local machine
@@ -260,46 +246,28 @@ impl SshConnection {
         tracing::info!("{task}");
 
         let mut channel = self.session.channel_open_session().await.unwrap();
-        let command = format!("dd if='{0}'\nchmod 777 {0}", source.to_str().unwrap());
-        channel.exec(true, command).await.unwrap();
+        channel.request_subsystem(true, "sftp").await.unwrap();
+        let sftp = SftpSession::new(channel.into_stream()).await.unwrap();
+        let mut file = sftp.open(source.to_str().unwrap()).await.unwrap();
 
-        let mut out = File::create(dest).await.unwrap();
-        let mut stderr = vec![];
-        let mut status = None;
-        let mut failed = None;
-        channel.eof().await.unwrap();
-        while let Some(msg) = channel.wait().await {
-            match msg {
-                ChannelMsg::Data { data } => tokio::io::AsyncWriteExt::write_all(&mut out, &data)
-                    .await
-                    .unwrap(),
-                ChannelMsg::ExtendedData { data, ext } => {
-                    if ext == 1 {
-                        stderr.write_all(&data).unwrap()
-                    } else {
-                        tracing::warn!("received unknown extended data with extension type {ext} containing: {:?}", data.to_vec())
-                    }
-                }
-                ChannelMsg::ExitStatus { exit_status } => {
-                    status = Some(exit_status);
-                    // cant exit immediately, there might be more data still
-                }
-                ChannelMsg::ExitSignal {
-                    signal_name,
-                    core_dumped,
-                    error_message,
-                    ..
-                } => {
-                    failed = Some(format!(
-                    "killed via signal {signal_name:?} core_dumped={core_dumped} {error_message:?}"
-                ))
-                }
-                _ => {}
+        let mut dest = File::create(dest)
+            .await
+            .map_err(|e| anyhow!(e).context(format!("Failed to read from {source:?}")))
+            .unwrap();
+
+        let mut bytes = vec![0u8; 1024 * 1024];
+        loop {
+            let read_count = file
+                .read(&mut bytes[..])
+                .await
+                .unwrap_or_else(|e| panic!("{task} failed to read from local disk with {e:?}"));
+            if read_count == 0 {
+                break;
             }
+            tokio::io::AsyncWriteExt::write_all(&mut dest, &bytes[0..read_count])
+                .await
+                .unwrap_or_else(|e| panic!("{task} failed to write to remote server with {e:?}"));
         }
-
-        let output = String::from_utf8(stderr).unwrap();
-        check_results(&task, failed, status, &output);
     }
 }
 
