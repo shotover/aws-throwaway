@@ -28,6 +28,18 @@ async fn main() {
         .await;
     println!("Time to push 100MB file {:?}", start.elapsed());
 
+    let remote_size: usize = instance
+        .ssh()
+        .shell("wc -c some_remote_file")
+        .await
+        .stdout
+        .split_ascii_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(remote_size, FILE_LEN);
+
     let start = Instant::now();
     instance
         .ssh()
