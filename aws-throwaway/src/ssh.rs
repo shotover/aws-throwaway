@@ -210,7 +210,7 @@ impl SshConnection {
 
     async fn push_file_impl<R: AsyncReadExt + Unpin>(&self, task: &str, source: R, dest: &Path) {
         let mut channel = self.session.channel_open_session().await.unwrap();
-        let command = format!("dd of='{0}'\nchmod 777 {0}", dest.to_str().unwrap());
+        let command = format!("cat > '{0}'\nchmod 777 {0}", dest.to_str().unwrap());
         channel.exec(true, command).await.unwrap();
 
         let mut stdout = vec![];
@@ -260,7 +260,7 @@ impl SshConnection {
         tracing::info!("{task}");
 
         let mut channel = self.session.channel_open_session().await.unwrap();
-        let command = format!("dd if='{0}'\nchmod 777 {0}", source.to_str().unwrap());
+        let command = format!("cat '{}'", source.to_str().unwrap());
         channel.exec(true, command).await.unwrap();
 
         let mut out = File::create(dest).await.unwrap();
