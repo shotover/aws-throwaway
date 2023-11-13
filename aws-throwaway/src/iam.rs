@@ -11,6 +11,5 @@ pub async fn user_name(config: &SdkConfig) -> String {
         .user()
         .unwrap()
         .user_name()
-        .unwrap()
         .to_string()
 }
