@@ -12,7 +12,7 @@ use aws_config::SdkConfig;
 use aws_sdk_ec2::config::Region;
 use aws_sdk_ec2::types::{
     BlockDeviceMapping, EbsBlockDevice, Filter, InstanceNetworkInterfaceSpecification, KeyType,
-    Placement, PlacementStrategy, ResourceType, Subnet, VolumeType,
+    Placement, ResourceType, Subnet, VolumeType,
 };
 use base64::Engine;
 use ssh_key::rand_core::OsRng;
@@ -22,6 +22,7 @@ use tags::Tags;
 use uuid::Uuid;
 
 pub use aws_sdk_ec2::types::InstanceType;
+pub use aws_sdk_ec2::types::PlacementStrategy;
 pub use ec2_instance::{Ec2Instance, NetworkInterface};
 pub use ec2_instance_definition::{Ec2InstanceDefinition, InstanceOs};
 pub use tags::CleanupResources;
@@ -38,6 +39,7 @@ pub struct AwsBuilder {
     use_public_addresses: bool,
     vpc_id: Option<String>,
     subnet_id: Option<String>,
+    placement_strategy: PlacementStrategy,
     security_group_id: Option<String>,
 }
 
@@ -85,6 +87,14 @@ impl AwsBuilder {
         self
     }
 
+    /// All EC2 instances are created within a single placement group with the specified strategy.
+    ///
+    /// The default is `PlacementStrategy::Spread`
+    pub fn use_placement_strategy(mut self, placement_strategy: PlacementStrategy) -> Self {
+        self.placement_strategy = placement_strategy;
+        self
+    }
+
     /// * Some(_) => All instances will use the specified security group
     /// * None => A single security group will be created for all instances to use. It will allow:
     ///      + ssh traffic in from the internet
@@ -122,7 +132,12 @@ impl AwsBuilder {
                 &self.vpc_id,
                 self.security_group_id
             ),
-            Aws::create_placement_group(&client, &tags, &placement_group_name),
+            Aws::create_placement_group(
+                &client,
+                &tags,
+                &placement_group_name,
+                self.placement_strategy
+            ),
             Aws::get_subnet(&client, self.subnet_id)
         );
 
@@ -180,6 +195,9 @@ impl Aws {
             use_public_addresses: true,
             vpc_id: None,
             subnet_id: None,
+            // refer to: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/placement-groups.html
+            // I believe Spread is the best default since it is the easiest for amazon to fulfill and gives the most realistic results in benchmarks.
+            placement_strategy: PlacementStrategy::Spread,
             security_group_id: None,
         }
     }
@@ -273,13 +291,16 @@ impl Aws {
         tracing::info!("created security group rule - ssh");
     }
 
-    async fn create_placement_group(client: &aws_sdk_ec2::Client, tags: &Tags, name: &str) {
+    async fn create_placement_group(
+        client: &aws_sdk_ec2::Client,
+        tags: &Tags,
+        name: &str,
+        strategy: PlacementStrategy,
+    ) {
         client
             .create_placement_group()
             .group_name(name)
-            // refer to: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/placement-groups.html
-            // For our current usage spread makes the most sense.
-            .strategy(PlacementStrategy::Spread)
+            .strategy(strategy)
             .tag_specifications(tags.create_tags(ResourceType::PlacementGroup, "aws-throwaway"))
             .send()
             .await
