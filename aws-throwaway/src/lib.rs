@@ -8,7 +8,7 @@ mod tags;
 use anyhow::anyhow;
 use aws_config::meta::region::RegionProviderChain;
 use aws_config::retry::ProvideErrorKind;
-use aws_config::SdkConfig;
+use aws_config::{BehaviorVersion, SdkConfig};
 use aws_sdk_ec2::config::Region;
 use aws_sdk_ec2::types::{
     BlockDeviceMapping, EbsBlockDevice, Filter, InstanceNetworkInterfaceSpecification, KeyType,
@@ -31,7 +31,10 @@ const AZ: &str = "us-east-1c";
 
 async fn config() -> SdkConfig {
     let region_provider = RegionProviderChain::first_try(Region::new("us-east-1"));
-    aws_config::from_env().region(region_provider).load().await
+    aws_config::defaults(BehaviorVersion::latest())
+        .region(region_provider)
+        .load()
+        .await
 }
 
 pub struct AwsBuilder {
@@ -368,7 +371,7 @@ impl Aws {
         );
 
         let mut ids_of_user = vec![];
-        for tag in user_tags.tags().unwrap() {
+        for tag in user_tags.tags() {
             if let Some(id) = tag.resource_id() {
                 ids_of_user.push(id.to_owned());
             }
@@ -376,7 +379,7 @@ impl Aws {
 
         if let Some(app_tags) = app_tags {
             let mut ids_of_user_and_app = vec![];
-            for app_tag in app_tags.tags().unwrap() {
+            for app_tag in app_tags.tags() {
                 if let Some(id) = app_tag.resource_id() {
                     let id = id.to_owned();
                     if ids_of_user.contains(&id) {
@@ -417,7 +420,6 @@ impl Aws {
                 .map_err(|e| e.into_service_error())
                 .unwrap()
                 .terminating_instances()
-                .unwrap()
             {
                 tracing::info!(
                     "Instance {:?} {:?} -> {:?}",
@@ -460,7 +462,7 @@ impl Aws {
                 .await
                 .map_err(|e| e.into_service_error())
                 .unwrap();
-            for placement_group in placement_groups.placement_groups().unwrap() {
+            for placement_group in placement_groups.placement_groups() {
                 let name = placement_group.group_name().unwrap();
                 if let Err(err) = client
                     .delete_placement_group()
@@ -604,7 +606,7 @@ sudo systemctl start ssh
             .map_err(|e| e.into_service_error())
             .unwrap();
 
-        let instance = result.instances().unwrap().first().unwrap();
+        let instance = result.instances().first().unwrap();
         let primary_network_interface_id = instance
             .network_interfaces
             .as_ref()
@@ -681,8 +683,8 @@ sudo systemctl start ssh
                 .map_err(|e| e.into_service_error());
             match instance {
                 Ok(instance) => {
-                    for reservation in instance.reservations().unwrap() {
-                        for instance in reservation.instances().unwrap() {
+                    for reservation in instance.reservations() {
+                        for instance in reservation.instances() {
                             if public_ip.is_none() {
                                 public_ip =
                                     instance.public_ip_address().map(|x| x.parse().unwrap());
