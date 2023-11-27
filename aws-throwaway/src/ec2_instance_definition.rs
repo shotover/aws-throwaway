@@ -1,6 +1,6 @@
 use crate::InstanceType;
 
-/// Defines an instance that can be launched via [`Aws::create_ec2_instance`]
+/// Defines an instance that can be launched via [`crate::Aws::create_ec2_instance`]
 pub struct Ec2InstanceDefinition {
     pub(crate) instance_type: InstanceType,
     pub(crate) volume_size_gb: u32,

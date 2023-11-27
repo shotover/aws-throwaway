@@ -14,7 +14,10 @@ aws-throwaway makes it trivial to spin up an instance, interact with it, and the
 ```rust
 let aws = Aws::builder(CleanupResources::AllResources).build().await;
 
-let instance = aws.create_ec2_instance(Ec2InstanceDefinition::new(InstanceType::T2Micro)).await;
+let instance = aws.create_ec2_instance(
+    Ec2InstanceDefinition::new(InstanceType::T2Micro)
+).await;
+
 let output = instance.ssh().shell("echo 'Hello world!'").await;
 println!("output from ec2 instance: {}", output.stdout);
 
