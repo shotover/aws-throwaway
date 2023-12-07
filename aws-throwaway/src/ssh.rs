@@ -5,7 +5,7 @@ use russh::{
     ChannelMsg, Sig,
 };
 use russh_keys::{key::PublicKey, PublicKeyBase64};
-use std::{fmt::Display, io::Write, net::IpAddr, path::Path, sync::Arc};
+use std::{fmt::Display, io::Write, net::IpAddr, path::Path, sync::Arc, time::Duration};
 use tokio::{
     fs::File,
     io::{AsyncReadExt, BufReader},
@@ -24,14 +24,19 @@ impl SshConnection {
         host_public_key_bytes: Vec<u8>,
         client_private_key: &str,
     ) -> Result<Self> {
-        let config = Arc::new(Config::default());
+        let config = Config {
+            // By default ssh has no keep alive, resulting in idle connections dying.
+            // So set a timeout of 60 seconds to prevent losing idle connections in this way.
+            keepalive_interval: Some(Duration::from_secs(60)),
+            ..Default::default()
+        };
 
         let key = Arc::new(
             russh_keys::decode_secret_key(client_private_key, None)
                 .map_err(|e| anyhow!(e).context("Failed to connect to ssh server"))?,
         );
         let mut session = russh::client::connect_stream(
-            config,
+            Arc::new(config),
             stream,
             Client {
                 host_public_key_bytes,
