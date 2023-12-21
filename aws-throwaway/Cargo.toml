@@ -12,8 +12,8 @@ description = "An aws-sdk wrapper to spin up temporary resources."
 aws-sdk-ec2 = "1.1.0"
 aws-sdk-iam = "1.1.0"
 aws-config = "1.0.0"
-russh = "0.39.0"
-russh-keys = "0.38.0"
+russh = "0.40.0"
+russh-keys = "0.40.0"
 base64 = "0.21.2"
 ssh-key = { version = "0.6.1", features = ["ed25519"] }
 tokio = { version = "1.25.0", features = ["full", "macros"] }
