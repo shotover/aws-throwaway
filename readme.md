@@ -93,3 +93,16 @@ In order to authenticate the ec2 instance, ssh keys are generated locally and up
 This means that any process on the machine that can run an http request can fetch the ssh keys.
 This should not pose a problem for its intended use case, but you should never use aws-throwaway created instances to host any kind of workload that would expose such functionality publically.
 For more information about this approach see: <https://alestic.com/2012/04/ec2-ssh-host-key/>
+
+## Build times
+
+By default this crate uses the official aws-sdk-ec2 crate.
+This crate has the worst build times I've ever seen, 360s on my local and quite powerful machine.
+To avoid this you can opt to set `default-features = false` which will make aws-throwaway shell out to the AWS CLI V2 instead of using the AWS SDK.
+
+The downsides of shelling out to the CLI are:
+
+* Shelling out to the CLI is slower at runtime than the SDK
+* Forces users to install the AWS CLI V2
+
+If they can fix their build times I would like to remove the CLI support to reduce maintence burden.

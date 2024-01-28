@@ -1,4 +1,4 @@
-use aws_sdk_ec2::types::InstanceType;
+use crate::InstanceType;
 
 /// Defines an instance that can be launched via [`Aws::create_ec2_instance`]
 pub struct Ec2InstanceDefinition {
