@@ -12,7 +12,7 @@ impl Tags {
     pub fn create_tags(
         &self,
         resource_type: ResourceType,
-        resource_name: &'static str,
+        resource_name: &str,
     ) -> TagSpecification {
         let mut builder = TagSpecification::builder()
             .resource_type(resource_type)

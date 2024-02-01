@@ -1,22 +1,24 @@
 mod instance_type;
-use std::{
-    net::IpAddr,
-    time::{Duration, Instant},
-};
-
-use base64::Engine;
-pub use instance_type::InstanceType;
-
 mod placement_strategy;
-pub use placement_strategy::PlacementStrategy;
-use ssh_key::{rand_core::OsRng, PrivateKey};
 
 use crate::{
     backend::cli::instance_type::get_arch_of_instance_type, AwsBuilder, CleanupResources,
     Ec2Instance, Ec2InstanceDefinition, InstanceOs, NetworkInterface, APP_TAG_NAME, USER_TAG_NAME,
 };
 use anyhow::{anyhow, Result};
+use base64::Engine;
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
+pub use instance_type::InstanceType;
+pub use placement_strategy::PlacementStrategy;
 use serde::Deserialize;
+use ssh_key::{rand_core::OsRng, PrivateKey};
+use std::future::Future;
+use std::pin::Pin;
+use std::{
+    net::IpAddr,
+    time::{Duration, Instant},
+};
 use uuid::Uuid;
 
 #[derive(Debug, Deserialize)]
@@ -137,7 +139,8 @@ impl Aws {
                 &tags,
                 &security_group_name,
                 &builder.vpc_id,
-                builder.security_group_id
+                builder.security_group_id,
+                &builder.expose_ports_to_internet
             ),
             Aws::create_placement_group(&tags, &placement_group_name, builder.placement_strategy),
             Aws::get_subnet(builder.subnet_id)
@@ -195,6 +198,7 @@ impl Aws {
         name: &str,
         vpc_id: &Option<String>,
         security_group_id: Option<String>,
+        ports: &[u16],
     ) -> String {
         match security_group_id {
             Some(id) => id,
@@ -222,10 +226,19 @@ impl Aws {
                 let result: SecurityGroup = run_command(&command).await.unwrap();
                 tracing::info!("created security group");
 
-                tokio::join!(
-                    Aws::create_ingress_rule_internal(tags, name),
-                    Aws::create_ingress_rule_ssh(tags, name),
-                );
+                let mut futures = FuturesUnordered::<Pin<Box<dyn Future<Output = ()>>>>::new();
+                futures.push(Box::pin(Aws::create_ingress_rule_internal(tags, name)));
+                if !ports.contains(&22) {
+                    // SSH
+                    futures.push(Box::pin(Aws::create_ingress_rule_for_port(tags, name, 22)));
+                }
+                for port in ports {
+                    futures.push(Box::pin(Aws::create_ingress_rule_for_port(
+                        tags, name, *port,
+                    )));
+                }
+                while futures.next().await.is_some() {}
+
                 result.group_id
             }
         }
@@ -247,7 +260,8 @@ impl Aws {
         tracing::info!("created security group rule - internal");
     }
 
-    async fn create_ingress_rule_ssh(tags: &Tags, group_name: &str) {
+    async fn create_ingress_rule_for_port(tags: &Tags, group_name: &str, port: u16) {
+        let port = port.to_string();
         let _result: Ignore = run_command(&[
             "ec2",
             "authorize-security-group-ingress",
@@ -256,17 +270,17 @@ impl Aws {
             "--ip-protocol",
             "tcp",
             "--from-port",
-            "22",
+            &port,
             "--to-port",
-            "22",
+            &port,
             "--cidr-ip",
             "0.0.0.0/0",
             "--tag-specifications",
-            &tags.create_tags("security-group-rule", "ssh"),
+            &tags.create_tags("security-group-rule", &format!("port {port}")),
         ])
         .await
         .unwrap();
-        tracing::info!("created security group rule - ssh");
+        tracing::info!("created security group rule - port {port}");
     }
 
     async fn create_placement_group(tags: &Tags, name: &str, strategy: PlacementStrategy) {

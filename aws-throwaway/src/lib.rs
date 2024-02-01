@@ -19,6 +19,7 @@ pub struct AwsBuilder {
     subnet_id: Option<String>,
     placement_strategy: PlacementStrategy,
     security_group_id: Option<String>,
+    expose_ports_to_internet: Vec<u16>,
 }
 
 /// The default configuration will succeed for an AMI user with sufficient access and unmodified default vpcs/subnets
@@ -42,6 +43,7 @@ impl AwsBuilder {
             // I believe Spread is the best default since it is the easiest for amazon to fulfill and gives the most realistic results in benchmarks.
             placement_strategy: PlacementStrategy::Spread,
             security_group_id: None,
+            expose_ports_to_internet: vec![],
         }
     }
 
@@ -98,7 +100,19 @@ impl AwsBuilder {
         self
     }
 
+    /// Adds the provided ports as allowing traffic in+out to internet in the automatically generated security group.
+    pub fn expose_ports_to_internet(mut self, ports: Vec<u16>) -> Self {
+        self.expose_ports_to_internet = ports;
+        self
+    }
+
+    /// Builds the Aws instance.
+    ///
+    /// Will panic if both `expose_ports_to_internet` and `use_security_group_id` are enabled.
     pub async fn build(self) -> Aws {
+        if !self.expose_ports_to_internet.is_empty() && self.security_group_id.is_some() {
+            panic!("Both `use_security_group_id` and `expose_ports_to_internet` are set. Ensure only one of these options is set.")
+        }
         Aws::new(self).await
     }
 }
