@@ -481,6 +481,7 @@ dependencies = [
  "aws-config",
  "aws-sdk-ec2",
  "aws-sdk-iam",
+ "aws-sdk-sts",
  "base64",
  "clap",
  "futures",
