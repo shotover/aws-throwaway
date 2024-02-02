@@ -1,25 +1,27 @@
 use super::tags::Tags;
+use crate::ec2_instance::{Ec2Instance, NetworkInterface};
+use crate::ec2_instance_definition::{Ec2InstanceDefinition, InstanceOs};
+use crate::AwsBuilder;
+use crate::CleanupResources;
 use anyhow::anyhow;
 use aws_config::meta::region::RegionProviderChain;
 use aws_config::retry::ProvideErrorKind;
 use aws_config::{BehaviorVersion, SdkConfig};
 use aws_sdk_ec2::config::Region;
+use aws_sdk_ec2::types::PlacementStrategy;
 use aws_sdk_ec2::types::{
     BlockDeviceMapping, EbsBlockDevice, Filter, InstanceNetworkInterfaceSpecification, KeyType,
     Placement, ResourceType, Subnet, VolumeType,
 };
 use base64::Engine;
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 use ssh_key::rand_core::OsRng;
 use ssh_key::PrivateKey;
+use std::future::Future;
+use std::pin::Pin;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
-
-use crate::ec2_instance::{Ec2Instance, NetworkInterface};
-use crate::ec2_instance_definition::{Ec2InstanceDefinition, InstanceOs};
-use crate::AwsBuilder;
-use crate::CleanupResources;
-
-use aws_sdk_ec2::types::PlacementStrategy;
 
 const AZ: &str = "us-east-1c";
 
@@ -71,7 +73,8 @@ impl Aws {
                 &tags,
                 &security_group_name,
                 &builder.vpc_id,
-                builder.security_group_id
+                builder.security_group_id,
+                &builder.expose_ports_to_internet
             ),
             Aws::create_placement_group(
                 &client,
@@ -136,6 +139,7 @@ impl Aws {
         name: &str,
         vpc_id: &Option<String>,
         security_group_id: Option<String>,
+        ports: &[u16],
     ) -> String {
         match security_group_id {
             Some(id) => id,
@@ -156,10 +160,22 @@ impl Aws {
                     .unwrap();
                 tracing::info!("created security group");
 
-                tokio::join!(
-                    Aws::create_ingress_rule_internal(client, tags, name),
-                    Aws::create_ingress_rule_ssh(client, tags, name),
-                );
+                let mut futures = FuturesUnordered::<Pin<Box<dyn Future<Output = ()>>>>::new();
+                futures.push(Box::pin(Aws::create_ingress_rule_internal(
+                    client, tags, name,
+                )));
+                // SSH
+                if !ports.contains(&22) {
+                    futures.push(Box::pin(Aws::create_ingress_rule_for_port(
+                        client, tags, name, 22,
+                    )));
+                }
+                for port in ports {
+                    futures.push(Box::pin(Aws::create_ingress_rule_for_port(
+                        client, tags, name, *port,
+                    )));
+                }
+                while futures.next().await.is_some() {}
                 security_group_id
             }
         }
@@ -186,7 +202,13 @@ impl Aws {
         tracing::info!("created security group rule - internal");
     }
 
-    async fn create_ingress_rule_ssh(client: &aws_sdk_ec2::Client, tags: &Tags, group_name: &str) {
+    async fn create_ingress_rule_for_port(
+        client: &aws_sdk_ec2::Client,
+        tags: &Tags,
+        group_name: &str,
+        port: u16,
+    ) {
+        let port = port.to_string();
         assert!(client
             .authorize_security_group_ingress()
             .group_name(group_name)
@@ -194,14 +216,16 @@ impl Aws {
             .from_port(22)
             .to_port(22)
             .cidr_ip("0.0.0.0/0")
-            .tag_specifications(tags.create_tags(ResourceType::SecurityGroupRule, "ssh"))
+            .tag_specifications(
+                tags.create_tags(ResourceType::SecurityGroupRule, &format!("port {port}"))
+            )
             .send()
             .await
             .map_err(|e| e.into_service_error())
             .unwrap()
             .r#return()
             .unwrap());
-        tracing::info!("created security group rule - ssh");
+        tracing::info!("created security group rule - port {port}");
     }
 
     async fn create_placement_group(
