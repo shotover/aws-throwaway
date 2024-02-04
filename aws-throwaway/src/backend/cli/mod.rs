@@ -753,8 +753,24 @@ sudo systemctl start ssh
 }
 
 async fn user_name() -> String {
-    let GetUser::User { user_name } = run_command(&["iam", "get-user"]).await.unwrap();
-    user_name
+    match iam_user_name().await {
+        Ok(name) => name,
+        Err(err) => {
+            tracing::debug!("Failed to run iam get-user, falling back to STS, error was: {err:?}");
+            sts_user_id().await
+        }
+    }
+}
+
+async fn iam_user_name() -> Result<String> {
+    let IamGetUser::User { user_name } = run_command(&["iam", "get-user"]).await?;
+    Ok(user_name)
+}
+
+async fn sts_user_id() -> String {
+    let StsGetCallerIdentity { user_id } =
+        run_command(&["sts", "get-caller-identity"]).await.unwrap();
+    user_id
 }
 
 async fn run_command_empty_response(args: &[&str]) -> Result<()> {
@@ -793,9 +809,15 @@ async fn run_command_string(args: &[&str]) -> Result<String> {
 }
 
 #[derive(serde::Deserialize)]
-enum GetUser {
+enum IamGetUser {
     User {
         #[serde(alias = "UserName")]
         user_name: String,
     },
+}
+
+#[derive(serde::Deserialize)]
+struct StsGetCallerIdentity {
+    #[serde(alias = "UserId")]
+    user_id: String,
 }
