@@ -31,6 +31,14 @@ impl Ec2Instance {
         self.private_ip
     }
 
+    /// Use this address to get the private or public IP that aws-throwaway is using to ssh to the instance.
+    /// Whether or not this is public is decided by AwsBuilder::use_public_addresses.
+    ///
+    /// You should use this address if you want to connect to the instance from your local machine
+    pub fn connect_ip(&self) -> IpAddr {
+        self.connect_ip
+    }
+
     /// List of all network interfaces attached to this instance.
     /// Includes the primary interface that has the ip returned by [`Ec2Instance::private_ip`] as well as all other interfaces attached to this instance at the time it was created.
     pub fn network_interfaces(&self) -> &[NetworkInterface] {
