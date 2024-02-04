@@ -160,7 +160,8 @@ impl Aws {
                     .unwrap();
                 tracing::info!("created security group");
 
-                let mut futures = FuturesUnordered::<Pin<Box<dyn Future<Output = ()>>>>::new();
+                let mut futures =
+                    FuturesUnordered::<Pin<Box<dyn Future<Output = ()> + Send>>>::new();
                 futures.push(Box::pin(Aws::create_ingress_rule_internal(
                     client, tags, name,
                 )));

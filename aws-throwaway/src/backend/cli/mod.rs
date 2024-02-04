@@ -226,7 +226,8 @@ impl Aws {
                 let result: SecurityGroup = run_command(&command).await.unwrap();
                 tracing::info!("created security group");
 
-                let mut futures = FuturesUnordered::<Pin<Box<dyn Future<Output = ()>>>>::new();
+                let mut futures =
+                    FuturesUnordered::<Pin<Box<dyn Future<Output = ()> + Send>>>::new();
                 futures.push(Box::pin(Aws::create_ingress_rule_internal(tags, name)));
                 if !ports.contains(&22) {
                     // SSH
@@ -505,13 +506,14 @@ impl Aws {
             struct ElasticIp {
                 #[serde(alias = "PublicIp")]
                 public_ip: String,
+                #[serde(alias = "AllocationId")]
                 allocation_id: String,
             }
             let result: ElasticIp = run_command(&[
                 "ec2",
                 "allocate-address",
                 "--tag-specifications",
-                &self.tags.create_tags("elastic-Ip", "aws-throwaway"),
+                &self.tags.create_tags("elastic-ip", "aws-throwaway"),
             ])
             .await
             .unwrap();
@@ -576,7 +578,7 @@ impl Aws {
             "AvailabilityZone={AZ},GroupName={}",
             self.placement_group_name
         );
-        let user_data = base64::engine::general_purpose::STANDARD.encode(format!(
+        let user_data = format!(
             r#"#!/bin/bash
 sudo systemctl stop ssh
 echo "{}" > /etc/ssh/ssh_host_ed25519_key.pub
@@ -586,7 +588,8 @@ echo "ClientAliveInterval 30" >> /etc/ssh/sshd_config
 sudo systemctl start ssh
 "#,
             self.host_public_key, self.host_private_key
-        ));
+        );
+        let user_data = base64::engine::general_purpose::STANDARD.encode(user_data);
         let block_device_mappings = format!(
             "DeviceName=/dev/sda1,Ebs={{DeleteOnTermination=true,VolumeSize={},VolumeType=gp2}}",
             definition.volume_size_gb
@@ -612,7 +615,7 @@ sudo systemctl start ssh
             "--block-device-mappings",
             &block_device_mappings,
         ];
-        let value;
+        let mut value = vec![];
         if definition.network_interface_count == 1 {
             command.push("--subnet-id");
             command.push(&self.subnet_id);
@@ -621,18 +624,18 @@ sudo systemctl start ssh
             command.push("--security-group-ids");
             command.push(&self.security_group_id);
         } else {
-            command.push("--networking-interfaces");
-            value = (0..definition.network_interface_count)
-                .map(|i| {
-                    format!(
-                        "DeleteOnTermination=true,AssociatePublicIpAddress=false,DeviceIndex={i},Groups={},SubnetId={},Description={i}",
-                        &self.security_group_id,
-                        &self.subnet_id
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            command.push(&value);
+            command.push("--network-interfaces");
+            for i in 0..definition.network_interface_count {
+                value.push(format!(
+                    "DeleteOnTermination=true,AssociatePublicIpAddress=false,DeviceIndex={i},Groups={},SubnetId={},Description={i}",
+                    &self.security_group_id,
+                    &self.subnet_id
+                ));
+            }
+            // lifetimes workaround
+            for value in &value {
+                command.push(value)
+            }
         }
 
         let result: RunInstancesResponse = run_command(&command).await.unwrap();
