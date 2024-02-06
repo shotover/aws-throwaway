@@ -122,6 +122,6 @@ pub enum CleanupResources {
     /// Cleanup resources created by all [`Aws`] instances that use [`CleanupResources::WithAppTag`] of the same tag.
     /// It is highly reccomended that this tag is hardcoded, generating this tag could easily lead to forgotten resources.
     WithAppTag(String),
-    /// Cleanup resources created by all [`Aws`] instances regardless of whether it was created via [`CleanupResources::AllResources`] or [`CleanupResources::ResourcesMatchingTag`]
+    /// Cleanup resources created by all [`Aws`] instances regardless of whether it was created via [`CleanupResources::AllResources`] or [`CleanupResources::WithAppTag`]
     AllResources,
 }

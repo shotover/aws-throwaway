@@ -1,9 +1,15 @@
 use crate::ssh::SshConnection;
+use anyhow::{anyhow, Context, Result};
+use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 use tokio::{net::TcpStream, time::Instant};
 
 /// Represents a currently running EC2 instance and provides various methods for interacting with the instance.
+///
+/// This type implements serde Serialize/Deserialize to allow you to save and restore the instance from disk.
+/// After restoring Ec2Instance in this way you need to call the [`Ec2Instance::init`] method.
+#[derive(Serialize, Deserialize)]
 pub struct Ec2Instance {
     connect_ip: IpAddr,
     public_ip: Option<IpAddr>,
@@ -11,10 +17,12 @@ pub struct Ec2Instance {
     client_private_key: String,
     host_public_key_bytes: Vec<u8>,
     host_public_key: String,
-    ssh: SshConnection,
+    #[serde(skip)]
+    ssh: Option<SshConnection>,
     network_interfaces: Vec<NetworkInterface>,
 }
 
+#[derive(Serialize, Deserialize)]
 pub struct NetworkInterface {
     pub private_ipv4: Ipv4Addr,
     pub device_index: i32,
@@ -32,7 +40,7 @@ impl Ec2Instance {
     }
 
     /// Use this address to get the private or public IP that aws-throwaway is using to ssh to the instance.
-    /// Whether or not this is public is decided by AwsBuilder::use_public_addresses.
+    /// Whether or not this is public is decided by [`crate::AwsBuilder::use_public_addresses`].
     ///
     /// You should use this address if you want to connect to the instance from your local machine
     pub fn connect_ip(&self) -> IpAddr {
@@ -62,7 +70,9 @@ impl Ec2Instance {
 
     /// Returns an object that allows commands to be sent over ssh
     pub fn ssh(&self) -> &SshConnection {
-        &self.ssh
+        self.ssh
+            .as_ref()
+            .expect("Make sure to call `Ec2Instance::init` after deserializing `Ec2Instance`")
     }
 
     /// Get a list of commands that the user can paste into bash to manually open an ssh connection to this instance.
@@ -132,7 +142,7 @@ TERM=xterm ssh -i key ubuntu@{} -o "UserKnownHostsFile known_hosts"
                         Ok(ssh) => {
                             break Ec2Instance {
                                 connect_ip,
-                                ssh,
+                                ssh: Some(ssh),
                                 public_ip,
                                 private_ip,
                                 host_public_key_bytes,
@@ -145,5 +155,33 @@ TERM=xterm ssh -i key ubuntu@{} -o "UserKnownHostsFile known_hosts"
                 }
             };
         }
+    }
+
+    /// After deserializing [`Ec2Instance`] this method must be called to recreate the ssh connection.
+    ///
+    /// No need to call after creating via [`crate::Aws::create_ec2_instance`]
+    pub async fn init(&mut self) -> Result<()> {
+        let connect_ip = self.connect_ip;
+
+        // We use a drastically simplifed initialization approach here compared to `Ec2Instance::new`.
+        // Since we can assume that the server has either already started up or is now terminated we
+        // avoid retries and tailor our error messages in order to provide better error reporting.
+        let stream =
+            tokio::time::timeout(Duration::from_secs(5), TcpStream::connect((connect_ip, 22)))
+                .await
+                .map_err(|_| anyhow!("Timed out connecting to {connect_ip}:22"))?
+                .with_context(|| format!("Failed to connect to {connect_ip}:22"))?;
+
+        let ssh = SshConnection::new(
+            stream,
+            connect_ip,
+            self.host_public_key_bytes.clone(),
+            &self.client_private_key,
+        )
+        .await
+        .with_context(|| format!("Failed to make ssh connection to {connect_ip}:22"))?;
+        self.ssh = Some(ssh);
+
+        Ok(())
     }
 }
