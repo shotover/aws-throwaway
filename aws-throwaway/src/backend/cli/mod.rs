@@ -6,7 +6,6 @@ use crate::{
     Ec2Instance, Ec2InstanceDefinition, InstanceOs, NetworkInterface, APP_TAG_NAME, USER_TAG_NAME,
 };
 use anyhow::{anyhow, Result};
-use base64::Engine;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 pub use instance_type::InstanceType;
@@ -589,7 +588,6 @@ sudo systemctl start ssh
 "#,
             self.host_public_key, self.host_private_key
         );
-        let user_data = base64::engine::general_purpose::STANDARD.encode(user_data);
         let block_device_mappings = format!(
             "DeviceName=/dev/sda1,Ebs={{DeleteOnTermination=true,VolumeSize={},VolumeType=gp2}}",
             definition.volume_size_gb
