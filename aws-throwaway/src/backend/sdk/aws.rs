@@ -346,6 +346,19 @@ impl Aws {
 
         tracing::info!("Terminating instances");
         let instance_ids = Self::get_all_throwaway_tags(client, tags, "instance").await;
+        Self::terminate_instances(client, instance_ids).await;
+
+        tokio::join!(
+            Aws::delete_security_groups(client, tags),
+            Aws::delete_placement_groups(client, tags),
+            Aws::delete_keypairs(client, tags),
+        );
+    }
+
+    pub(crate) async fn terminate_instances(
+        client: &aws_sdk_ec2::Client,
+        instance_ids: Vec<String>,
+    ) {
         if !instance_ids.is_empty() {
             for result in client
                 .terminate_instances()
@@ -364,12 +377,10 @@ impl Aws {
                 );
             }
         }
+    }
 
-        tokio::join!(
-            Aws::delete_security_groups(client, tags),
-            Aws::delete_placement_groups(client, tags),
-            Aws::delete_keypairs(client, tags),
-        );
+    pub(crate) async fn terminate_instance(&self, instance: Ec2Instance) {
+        Self::terminate_instances(&self.client, vec![instance.aws_id]).await
     }
 
     async fn delete_security_groups(client: &aws_sdk_ec2::Client, tags: &Tags) {
@@ -637,6 +648,7 @@ sudo systemctl start ssh
                 }
             }
         }
+        let aws_id = instance.instance_id().unwrap().to_owned();
 
         let private_ip = private_ip.unwrap();
         let connect_ip = if self.use_public_addresses {
@@ -647,6 +659,7 @@ sudo systemctl start ssh
         tracing::info!("created EC2 instance at public:{public_ip:?} private:{private_ip}");
 
         Ec2Instance::new(
+            aws_id,
             connect_ip,
             public_ip,
             private_ip,

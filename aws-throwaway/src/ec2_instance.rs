@@ -1,4 +1,5 @@
 use crate::ssh::SshConnection;
+use crate::Aws;
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr};
@@ -11,6 +12,7 @@ use tokio::{net::TcpStream, time::Instant};
 /// After restoring Ec2Instance in this way you need to call the [`Ec2Instance::init`] method.
 #[derive(Serialize, Deserialize)]
 pub struct Ec2Instance {
+    pub(crate) aws_id: String,
     connect_ip: IpAddr,
     public_ip: Option<IpAddr>,
     private_ip: IpAddr,
@@ -91,8 +93,19 @@ TERM=xterm ssh -i key ubuntu@{} -o "UserKnownHostsFile known_hosts"
         )
     }
 
+    /// Delete this instance.
+    /// Prefer using [`Aws::cleanup_resources`] at end of runtime as it will automatically destroy all resources, not just this one instance.
+    /// However this method can be useful when you have a single instance that you would like to terminate before the rest.
+    ///
+    /// `Aws` instance must be passed in manually here since `Ec2Instance`s can be deserialized when there is no `Aws` instance.
+    pub async fn terminate(self, aws: &Aws) {
+        aws.terminate_instance(self).await;
+    }
+
     /// It is gauranteed that public_ip will be Some if use_public_address is true
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn new(
+        aws_id: String,
         connect_ip: IpAddr,
         public_ip: Option<IpAddr>,
         private_ip: IpAddr,
@@ -141,6 +154,7 @@ TERM=xterm ssh -i key ubuntu@{} -o "UserKnownHostsFile known_hosts"
                         // 4. Then finally we have a working ssh connection.
                         Ok(ssh) => {
                             break Ec2Instance {
+                                aws_id,
                                 connect_ip,
                                 ssh: Some(ssh),
                                 public_ip,
