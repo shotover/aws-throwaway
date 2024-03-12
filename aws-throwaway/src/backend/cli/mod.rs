@@ -12,6 +12,7 @@ pub use instance_type::InstanceType;
 pub use placement_strategy::PlacementStrategy;
 use serde::Deserialize;
 use ssh_key::{rand_core::OsRng, PrivateKey};
+use std::fmt::Write;
 use std::future::Future;
 use std::pin::Pin;
 use std::{
@@ -577,8 +578,19 @@ impl Aws {
             "AvailabilityZone={AZ},GroupName={}",
             self.placement_group_name
         );
+        // Secondary interfaces should not be used until they are configured.
+        let mut bring_down_secondary_interfaces = String::new();
+        for i in 1..definition.network_interface_count {
+            writeln!(
+                bring_down_secondary_interfaces,
+                "sudo ip link set dev ens{} down",
+                5 + i
+            )
+            .unwrap();
+        }
         let user_data = format!(
             r#"#!/bin/bash
+{bring_down_secondary_interfaces}
 sudo systemctl stop ssh
 echo "{}" > /etc/ssh/ssh_host_ed25519_key.pub
 echo "{}" > /etc/ssh/ssh_host_ed25519_key

@@ -18,6 +18,7 @@ use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use ssh_key::rand_core::OsRng;
 use ssh_key::PrivateKey;
+use std::fmt::Write;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
@@ -461,6 +462,17 @@ impl Aws {
             None
         };
 
+        // Secondary interfaces should not be used until they are configured.
+        let mut bring_down_secondary_interfaces = String::new();
+        for i in 1..definition.network_interface_count {
+            writeln!(
+                bring_down_secondary_interfaces,
+                "sudo ip link set dev ens{} down",
+                5 + i
+            )
+            .unwrap();
+        }
+
         let ubuntu_version = match definition.os {
             InstanceOs::Ubuntu20_04 => "20.04",
             InstanceOs::Ubuntu22_04 => "22.04",
@@ -522,13 +534,14 @@ impl Aws {
             .key_name(&self.keyname)
             .user_data(base64::engine::general_purpose::STANDARD.encode(format!(
                 r#"#!/bin/bash
+{bring_down_secondary_interfaces}
 sudo systemctl stop ssh
 echo "{}" > /etc/ssh/ssh_host_ed25519_key.pub
 echo "{}" > /etc/ssh/ssh_host_ed25519_key
 
 echo "ClientAliveInterval 30" >> /etc/ssh/sshd_config
 sudo systemctl start ssh
-            "#,
+"#,
                 self.host_public_key, self.host_private_key
             )))
             .tag_specifications(
