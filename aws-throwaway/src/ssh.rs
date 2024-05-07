@@ -354,10 +354,7 @@ struct Client {
 impl Handler for Client {
     type Error = anyhow::Error;
 
-    async fn check_server_key(
-        self,
-        host_public_key: &PublicKey,
-    ) -> Result<(Self, bool), Self::Error> {
+    async fn check_server_key(&mut self, host_public_key: &PublicKey) -> Result<bool, Self::Error> {
         let result = host_public_key.public_key_bytes() == self.host_public_key_bytes;
         if !result {
             // This is just a debug because the actual error is bubbled up via russh
@@ -367,6 +364,6 @@ impl Handler for Client {
                 self.host_public_key_bytes
             );
         }
-        Ok((self, result))
+        Ok(result)
     }
 }
