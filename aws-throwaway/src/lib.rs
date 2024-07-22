@@ -16,6 +16,7 @@ pub struct AwsBuilder {
     cleanup: CleanupResources,
     use_public_addresses: bool,
     vpc_id: Option<String>,
+    az_name: Option<String>,
     subnet_id: Option<String>,
     placement_strategy: PlacementStrategy,
     security_group_id: Option<String>,
@@ -28,8 +29,8 @@ pub struct AwsBuilder {
 /// * you want to connect directly from within the VPC
 /// * you have already created a specific VPC, subnet or security group that you want aws-throwaway to make use of.
 ///
-/// All resources will be created in us-east-1c.
-/// This is hardcoded so that aws-throawaway only has to look into one region when cleaning up.
+/// All resources will be created in us-east-1.
+/// This is hardcoded so that aws-throwaway only has to look into one region when cleaning up.
 /// All instances are created in a single spread placement group in a single AZ to ensure consistent latency between instances.
 // TODO: document minimum required access for default configuration.
 impl AwsBuilder {
@@ -38,6 +39,7 @@ impl AwsBuilder {
             cleanup,
             use_public_addresses: true,
             vpc_id: None,
+            az_name: None,
             subnet_id: None,
             // refer to: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/placement-groups.html
             // I believe Spread is the best default since it is the easiest for amazon to fulfill and gives the most realistic results in benchmarks.
@@ -68,6 +70,15 @@ impl AwsBuilder {
     /// The default is `None`
     pub fn use_vpc_id(mut self, vpc_id: Option<String>) -> Self {
         self.vpc_id = vpc_id;
+        self
+    }
+
+    /// * Some(_) => All resources will go into the specified AZ
+    /// * None => All resources will go into the default AZ (us-east-1c)
+    ///
+    /// The default is `None`
+    pub fn use_az(mut self, az_name: Option<String>) -> Self {
+        self.az_name = az_name;
         self
     }
 

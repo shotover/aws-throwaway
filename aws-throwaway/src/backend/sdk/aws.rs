@@ -24,8 +24,6 @@ use std::pin::Pin;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-const AZ: &str = "us-east-1c";
-
 async fn config() -> SdkConfig {
     let region_provider = RegionProviderChain::first_try(Region::new("us-east-1"));
     aws_config::defaults(BehaviorVersion::latest())
@@ -37,6 +35,7 @@ async fn config() -> SdkConfig {
 /// Construct this type to create and cleanup aws resources.
 pub struct Aws {
     client: aws_sdk_ec2::Client,
+    az_name: String,
     keyname: String,
     client_private_key: String,
     host_public_key: String,
@@ -57,6 +56,7 @@ impl Aws {
         let keyname = format!("aws-throwaway-{user_name}-{}", Uuid::new_v4());
         let security_group_name = format!("aws-throwaway-{user_name}-{}", Uuid::new_v4());
         let placement_group_name = format!("aws-throwaway-{user_name}-{}", Uuid::new_v4());
+        let az_name = builder.az_name.unwrap_or_else(|| "us-east-1c".into());
         let client = aws_sdk_ec2::Client::new(&config);
 
         let tags = Tags {
@@ -83,7 +83,7 @@ impl Aws {
                 &placement_group_name,
                 builder.placement_strategy
             ),
-            Aws::get_subnet(&client, builder.subnet_id)
+            Aws::get_subnet(&client, builder.subnet_id, az_name.clone())
         );
 
         let subnet_id = subnet.subnet_id.unwrap();
@@ -99,6 +99,7 @@ impl Aws {
         Aws {
             use_public_addresses,
             client,
+            az_name,
             keyname,
             client_private_key,
             host_public_key_bytes,
@@ -111,6 +112,7 @@ impl Aws {
             tags,
         }
     }
+
     /// Returns an [`AwsBuilder`] that will build a new [`Aws`].
     ///
     /// Before building the [`Aws`], all preexisting resources conforming to the specified [`CleanupResources`] approach are destroyed.
@@ -248,8 +250,12 @@ impl Aws {
         tracing::info!("created placement group");
     }
 
-    async fn get_subnet(client: &aws_sdk_ec2::Client, subnet_id: Option<String>) -> Subnet {
-        match subnet_id {
+    async fn get_subnet(
+        client: &aws_sdk_ec2::Client,
+        subnet_id: Option<String>,
+        az_name: String,
+    ) -> Subnet {
+        match &subnet_id {
             Some(subnet_id) => client.describe_subnets().filters(
                 Filter::builder()
                     .name("subnet-id")
@@ -267,7 +273,7 @@ impl Aws {
                 .filters(
                     Filter::builder()
                         .name("availability-zone")
-                        .values(AZ)
+                        .values(&az_name)
                         .build(),
                 ),
         }
@@ -278,7 +284,10 @@ impl Aws {
         .subnets
         .unwrap()
         .pop()
-        .unwrap()
+        .unwrap_or_else(|| match subnet_id {
+            Some(subnet) => panic!("Subnet {subnet} could not be found"),
+            None => panic!("No default subnet configured for {az_name}"),
+        })
     }
 
     /// Call before dropping [`Aws`]
@@ -500,7 +509,7 @@ impl Aws {
             .set_placement(Some(
                 Placement::builder()
                     .group_name(&self.placement_group_name)
-                    .availability_zone(AZ)
+                    .availability_zone(&self.az_name)
                     .build(),
             ))
             .set_subnet_id(if definition.network_interface_count == 1 {
@@ -518,6 +527,7 @@ impl Aws {
                             .delete_on_termination(true)
                             .volume_size(definition.volume_size_gb as i32)
                             .volume_type(VolumeType::Gp2)
+                            .encrypted(true)
                             .build(),
                     )
                     .build(),

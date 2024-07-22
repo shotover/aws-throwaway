@@ -38,8 +38,6 @@ struct Subnet {
     map_public_ip_on_launch: Option<bool>,
 }
 
-const AZ: &str = "us-east-1c";
-
 struct Tags {
     pub user_name: String,
     pub cleanup: CleanupResources,
@@ -103,6 +101,7 @@ impl Tags {
 pub struct Aws {
     tags: Tags,
     keyname: String,
+    az_name: String,
     client_private_key: String,
     host_public_key: String,
     host_public_key_bytes: Vec<u8>,
@@ -125,6 +124,7 @@ impl Aws {
         let keyname = format!("aws-throwaway-{user_name}-{}", Uuid::new_v4());
         let security_group_name = format!("aws-throwaway-{user_name}-{}", Uuid::new_v4());
         let placement_group_name = format!("aws-throwaway-{user_name}-{}", Uuid::new_v4());
+        let az_name = builder.az_name.unwrap_or_else(|| "us-east-1c".into());
 
         let tags = Tags {
             user_name,
@@ -143,7 +143,7 @@ impl Aws {
                 &builder.expose_ports_to_internet
             ),
             Aws::create_placement_group(&tags, &placement_group_name, builder.placement_strategy),
-            Aws::get_subnet(builder.subnet_id)
+            Aws::get_subnet(builder.subnet_id, az_name.clone())
         );
 
         let subnet_id = subnet.subnet_id.unwrap();
@@ -158,6 +158,7 @@ impl Aws {
 
         Aws {
             use_public_addresses,
+            az_name,
             keyname,
             client_private_key,
             host_public_key_bytes,
@@ -300,13 +301,13 @@ impl Aws {
         tracing::info!("created placement group");
     }
 
-    async fn get_subnet(subnet_id: Option<String>) -> Subnet {
+    async fn get_subnet(subnet_id: Option<String>, az_name: String) -> Subnet {
         let mut command = vec!["ec2", "describe-subnets", "--filters"];
 
         // this is needed to keep the string values alive for the length of the borrow
         let value;
 
-        match subnet_id {
+        match &subnet_id {
             Some(subnet_id) => command.push({
                 value = format!("Name=subnet-id,Values={subnet_id}");
                 &value
@@ -314,7 +315,7 @@ impl Aws {
             None => {
                 command.push("Name=default-for-az,Values=true");
                 command.push({
-                    value = format!("Name=availability-zone,Values={AZ}");
+                    value = format!("Name=availability-zone,Values={az_name}");
                     &value
                 });
             }
@@ -326,7 +327,10 @@ impl Aws {
         }
         let Response::Subnets(mut result) = run_command(&command).await.unwrap();
 
-        result.pop().unwrap()
+        result.pop().unwrap_or_else(|| match subnet_id {
+            Some(subnet) => panic!("Subnet {subnet} could not be found"),
+            None => panic!("No default subnet configured for {az_name}"),
+        })
     }
 
     /// Call before dropping [`Aws`]
@@ -583,8 +587,8 @@ impl Aws {
 
         let tag_specifications = self.tags.create_tags("instance", "aws-throwaway");
         let placement = format!(
-            "AvailabilityZone={AZ},GroupName={}",
-            self.placement_group_name
+            "AvailabilityZone={},GroupName={}",
+            self.az_name, self.placement_group_name
         );
         // Secondary interfaces should not be used until they are configured.
         let mut bring_down_secondary_interfaces = String::new();
@@ -609,7 +613,7 @@ sudo systemctl start ssh
             self.host_public_key, self.host_private_key
         );
         let block_device_mappings = format!(
-            "DeviceName=/dev/sda1,Ebs={{DeleteOnTermination=true,VolumeSize={},VolumeType=gp2}}",
+            "DeviceName=/dev/sda1,Ebs={{DeleteOnTermination=true,VolumeSize={},VolumeType=gp2,Encrypted=true}}",
             definition.volume_size_gb
         );
 
