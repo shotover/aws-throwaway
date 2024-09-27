@@ -12,7 +12,10 @@ async fn main() {
         .with_writer(non_blocking)
         .init();
 
-    let aws = Aws::builder(CleanupResources::AllResources).build().await;
+    let aws = Aws::builder(CleanupResources::AllResources)
+        .use_ingress_restriction(aws_throwaway::IngressRestriction::LocalPublicAddress)
+        .build()
+        .await;
     let instance = aws
         .create_ec2_instance(Ec2InstanceDefinition::new(InstanceType::T2Micro))
         .await;

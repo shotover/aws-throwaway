@@ -1,8 +1,8 @@
 use super::tags::Tags;
 use crate::ec2_instance::{Ec2Instance, NetworkInterface};
 use crate::ec2_instance_definition::{Ec2InstanceDefinition, InstanceOs};
-use crate::AwsBuilder;
 use crate::CleanupResources;
+use crate::{AwsBuilder, IngressRestriction};
 use anyhow::anyhow;
 use aws_config::meta::region::RegionProviderChain;
 use aws_config::retry::ProvideErrorKind;
@@ -75,7 +75,8 @@ impl Aws {
                 &security_group_name,
                 &builder.vpc_id,
                 builder.security_group_id,
-                &builder.expose_ports_to_internet
+                &builder.expose_ports_to_internet,
+                builder.ingress_restriction,
             ),
             Aws::create_placement_group(
                 &client,
@@ -143,20 +144,24 @@ impl Aws {
         vpc_id: &Option<String>,
         security_group_id: Option<String>,
         ports: &[u16],
+        ingress_restriction: IngressRestriction,
     ) -> String {
         match security_group_id {
             Some(id) => id,
             None => {
-                let security_group_id = client
-                    .create_security_group()
-                    .group_name(name)
-                    .set_vpc_id(vpc_id.clone())
-                    .description("aws-throwaway security group")
-                    .tag_specifications(
-                        tags.create_tags(ResourceType::SecurityGroup, "aws-throwaway"),
-                    )
-                    .send()
-                    .await
+                let (security_group, cidr_ip) = tokio::join!(
+                    client
+                        .create_security_group()
+                        .group_name(name)
+                        .set_vpc_id(vpc_id.clone())
+                        .description("aws-throwaway security group")
+                        .tag_specifications(
+                            tags.create_tags(ResourceType::SecurityGroup, "aws-throwaway"),
+                        )
+                        .send(),
+                    ingress_restriction.cidr_ip()
+                );
+                let security_group_id = security_group
                     .map_err(|e| e.into_service_error())
                     .unwrap()
                     .group_id
@@ -168,15 +173,16 @@ impl Aws {
                 futures.push(Box::pin(Aws::create_ingress_rule_internal(
                     client, tags, name,
                 )));
+
                 // SSH
                 if !ports.contains(&22) {
                     futures.push(Box::pin(Aws::create_ingress_rule_for_port(
-                        client, tags, name, 22,
+                        client, tags, name, &cidr_ip, 22,
                     )));
                 }
                 for port in ports {
                     futures.push(Box::pin(Aws::create_ingress_rule_for_port(
-                        client, tags, name, *port,
+                        client, tags, name, &cidr_ip, *port,
                     )));
                 }
                 while futures.next().await.is_some() {}
@@ -210,6 +216,7 @@ impl Aws {
         client: &aws_sdk_ec2::Client,
         tags: &Tags,
         group_name: &str,
+        cidr_ip: &str,
         port: u16,
     ) {
         let port = port.to_string();
@@ -219,7 +226,7 @@ impl Aws {
             .ip_protocol("tcp")
             .from_port(22)
             .to_port(22)
-            .cidr_ip("0.0.0.0/0")
+            .cidr_ip(cidr_ip)
             .tag_specifications(
                 tags.create_tags(ResourceType::SecurityGroupRule, &format!("port {port}"))
             )
