@@ -3,7 +3,8 @@ mod placement_strategy;
 
 use crate::{
     backend::cli::instance_type::get_arch_of_instance_type, AwsBuilder, CleanupResources,
-    Ec2Instance, Ec2InstanceDefinition, InstanceOs, NetworkInterface, APP_TAG_NAME, USER_TAG_NAME,
+    Ec2Instance, Ec2InstanceDefinition, IngressRestriction, InstanceOs, NetworkInterface,
+    APP_TAG_NAME, USER_TAG_NAME,
 };
 use anyhow::{anyhow, Result};
 use futures::stream::FuturesUnordered;
@@ -140,7 +141,8 @@ impl Aws {
                 &security_group_name,
                 &builder.vpc_id,
                 builder.security_group_id,
-                &builder.expose_ports_to_internet
+                &builder.expose_ports_to_internet,
+                builder.ingress_restriction
             ),
             Aws::create_placement_group(&tags, &placement_group_name, builder.placement_strategy),
             Aws::get_subnet(builder.subnet_id, az_name.clone())
@@ -200,6 +202,7 @@ impl Aws {
         vpc_id: &Option<String>,
         security_group_id: Option<String>,
         ports: &[u16],
+        ingress_restriction: IngressRestriction,
     ) -> String {
         match security_group_id {
             Some(id) => id,
@@ -224,7 +227,11 @@ impl Aws {
                     command.push("--vpc-id");
                     command.push(vpc_id);
                 }
-                let result: SecurityGroup = run_command(&command).await.unwrap();
+                let (result, cidr_ip) = tokio::join!(
+                    run_command::<SecurityGroup>(&command),
+                    ingress_restriction.cidr_ip()
+                );
+                let group_id = result.unwrap().group_id;
                 tracing::info!("created security group");
 
                 let mut futures =
@@ -232,16 +239,18 @@ impl Aws {
                 futures.push(Box::pin(Aws::create_ingress_rule_internal(tags, name)));
                 if !ports.contains(&22) {
                     // SSH
-                    futures.push(Box::pin(Aws::create_ingress_rule_for_port(tags, name, 22)));
+                    futures.push(Box::pin(Aws::create_ingress_rule_for_port(
+                        tags, name, &cidr_ip, 22,
+                    )));
                 }
                 for port in ports {
                     futures.push(Box::pin(Aws::create_ingress_rule_for_port(
-                        tags, name, *port,
+                        tags, name, &cidr_ip, *port,
                     )));
                 }
                 while futures.next().await.is_some() {}
 
-                result.group_id
+                group_id
             }
         }
     }
@@ -262,7 +271,7 @@ impl Aws {
         tracing::info!("created security group rule - internal");
     }
 
-    async fn create_ingress_rule_for_port(tags: &Tags, group_name: &str, port: u16) {
+    async fn create_ingress_rule_for_port(tags: &Tags, group_name: &str, cidr_ip: &str, port: u16) {
         let port = port.to_string();
         let _result: Ignore = run_command(&[
             "ec2",
@@ -276,7 +285,7 @@ impl Aws {
             "--to-port",
             &port,
             "--cidr-ip",
-            "0.0.0.0/0",
+            cidr_ip,
             "--tag-specifications",
             &tags.create_tags("security-group-rule", &format!("port {port}")),
         ])
