@@ -22,6 +22,7 @@ async fn main() {
         println!("Creating instance of type {instance_type}");
 
         let aws = Aws::builder(CleanupResources::WithAppTag(AWS_THROWAWAY_TAG.to_owned()))
+            .use_ingress_restriction(aws_throwaway::IngressRestriction::LocalPublicAddress)
             .build()
             .await;
         let instance_type = InstanceType::from_str(&instance_type).unwrap();

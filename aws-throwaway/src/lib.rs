@@ -3,6 +3,8 @@ mod ec2_instance;
 mod ec2_instance_definition;
 mod ssh;
 
+use std::net::IpAddr;
+
 pub use backend::{Aws, InstanceType, PlacementStrategy};
 pub use ec2_instance::{Ec2Instance, NetworkInterface};
 pub use ec2_instance_definition::{Ec2InstanceDefinition, InstanceOs};
@@ -15,6 +17,7 @@ const APP_TAG_NAME: &str = "aws-throwaway-23c2d22c-d929-43fc-b2a4-c1c72f0b733f:a
 pub struct AwsBuilder {
     cleanup: CleanupResources,
     use_public_addresses: bool,
+    ingress_restriction: IngressRestriction,
     vpc_id: Option<String>,
     az_name: Option<String>,
     subnet_id: Option<String>,
@@ -38,6 +41,7 @@ impl AwsBuilder {
         AwsBuilder {
             cleanup,
             use_public_addresses: true,
+            ingress_restriction: IngressRestriction::NoRestrictions,
             vpc_id: None,
             az_name: None,
             subnet_id: None,
@@ -61,6 +65,11 @@ impl AwsBuilder {
     /// The default is `true`.
     pub fn use_public_addresses(mut self, use_public_addresses: bool) -> Self {
         self.use_public_addresses = use_public_addresses;
+        self
+    }
+
+    pub fn use_ingress_restriction(mut self, ingress_restriction: IngressRestriction) -> Self {
+        self.ingress_restriction = ingress_restriction;
         self
     }
 
@@ -112,6 +121,7 @@ impl AwsBuilder {
     }
 
     /// Adds the provided ports as allowing traffic in+out to internet in the automatically generated security group.
+    /// By default ingress is allowed from port 22 and this cannot be disabled.
     pub fn expose_ports_to_internet(mut self, ports: Vec<u16>) -> Self {
         self.expose_ports_to_internet = ports;
         self
@@ -135,4 +145,37 @@ pub enum CleanupResources {
     WithAppTag(String),
     /// Cleanup resources created by all [`Aws`] instances regardless of whether it was created via [`CleanupResources::AllResources`] or [`CleanupResources::WithAppTag`]
     AllResources,
+}
+
+/// Defines how to derive the ingress rules of the generated security group for external access.
+///
+/// Internal network traffic between instances created through aws-throwaway is always allowed,
+/// regardless of the `IngressRestriction` value used.
+///
+/// These rules apply to the always enabled port 22 and any extra ports enabled by `AwsBuilder::expose_ports_to_internet`.
+#[non_exhaustive]
+pub enum IngressRestriction {
+    /// Allow ingress from any machine on the internet.
+    /// Many corporate environments will disallow this.
+    NoRestrictions,
+    /// Allow ingress only from the public IP address of the machine aws-throwaway is running on.
+    /// Possibly slightly slower to startup, the public IP will be fetched from https://api.ipify.org in parallel to other work.
+    LocalPublicAddress,
+    // In the future we might add:
+    //UseSpecificAddress(IpAddr)
+}
+
+impl IngressRestriction {
+    async fn cidr_ip(&self) -> String {
+        match self {
+            IngressRestriction::NoRestrictions => "0.0.0.0/0".to_owned(),
+            IngressRestriction::LocalPublicAddress => {
+                let api = "https://api.ipify.org";
+                let ip = reqwest::get(api).await.unwrap().text().await.unwrap();
+                // roundtrip through IpAddr to ensure that we did in fact receive an IP.
+                let ip: IpAddr = ip.parse().unwrap();
+                format!("{ip}/32")
+            }
+        }
+    }
 }
