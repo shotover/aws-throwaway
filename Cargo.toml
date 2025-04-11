@@ -2,4 +2,4 @@
 members = [
     "aws-throwaway",
 ]
-resolver = "2"
+resolver = "3"

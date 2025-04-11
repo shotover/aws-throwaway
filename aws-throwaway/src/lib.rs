@@ -132,7 +132,9 @@ impl AwsBuilder {
     /// Will panic if both `expose_ports_to_internet` and `use_security_group_id` are enabled.
     pub async fn build(self) -> Aws {
         if !self.expose_ports_to_internet.is_empty() && self.security_group_id.is_some() {
-            panic!("Both `use_security_group_id` and `expose_ports_to_internet` are set. Ensure only one of these options is set.")
+            panic!(
+                "Both `use_security_group_id` and `expose_ports_to_internet` are set. Ensure only one of these options is set."
+            )
         }
         Aws::new(self).await
     }

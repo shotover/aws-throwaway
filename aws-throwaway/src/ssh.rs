@@ -1,10 +1,10 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use russh::{
-    client::{Config, Handle, Handler},
     ChannelMsg, Sig,
+    client::{Config, Handle, Handler},
 };
-use russh_keys::{key::PublicKey, PublicKeyBase64};
+use russh_keys::{PublicKeyBase64, key::PublicKey};
 use std::{fmt::Display, io::Write, net::IpAddr, path::Path, sync::Arc, time::Duration};
 use tokio::{
     fs::File,
@@ -74,7 +74,10 @@ impl SshConnection {
                     if ext == 1 {
                         stderr.write_all(&data).unwrap()
                     } else {
-                        tracing::warn!("received unknown extended data with extension type {ext} containing: {:?}", data.to_vec())
+                        tracing::warn!(
+                            "received unknown extended data with extension type {ext} containing: {:?}",
+                            data.to_vec()
+                        )
                     }
                 }
                 ChannelMsg::ExitStatus { exit_status } => {
@@ -88,8 +91,8 @@ impl SshConnection {
                     ..
                 } => {
                     failed = Some(format!(
-                    "killed via signal {signal_name:?} core_dumped={core_dumped} {error_message:?}"
-                ))
+                        "killed via signal {signal_name:?} core_dumped={core_dumped} {error_message:?}"
+                    ))
                 }
                 _ => {}
             }
@@ -231,7 +234,10 @@ impl SshConnection {
                     if ext == 1 {
                         stderr.write_all(&data).unwrap()
                     } else {
-                        tracing::warn!("received unknown extended data with extension type {ext} containing: {:?}", data.to_vec())
+                        tracing::warn!(
+                            "received unknown extended data with extension type {ext} containing: {:?}",
+                            data.to_vec()
+                        )
                     }
                 }
                 ChannelMsg::ExitStatus { exit_status } => {
@@ -245,8 +251,8 @@ impl SshConnection {
                     ..
                 } => {
                     failed = Some(format!(
-                    "killed via signal {signal_name:?} core_dumped={core_dumped} {error_message:?}"
-                ))
+                        "killed via signal {signal_name:?} core_dumped={core_dumped} {error_message:?}"
+                    ))
                 }
                 _ => {}
             }
@@ -282,7 +288,10 @@ impl SshConnection {
                     if ext == 1 {
                         stderr.write_all(&data).unwrap()
                     } else {
-                        tracing::warn!("received unknown extended data with extension type {ext} containing: {:?}", data.to_vec())
+                        tracing::warn!(
+                            "received unknown extended data with extension type {ext} containing: {:?}",
+                            data.to_vec()
+                        )
                     }
                 }
                 ChannelMsg::ExitStatus { exit_status } => {
@@ -296,8 +305,8 @@ impl SshConnection {
                     ..
                 } => {
                     failed = Some(format!(
-                    "killed via signal {signal_name:?} core_dumped={core_dumped} {error_message:?}"
-                ))
+                        "killed via signal {signal_name:?} core_dumped={core_dumped} {error_message:?}"
+                    ))
                 }
                 _ => {}
             }

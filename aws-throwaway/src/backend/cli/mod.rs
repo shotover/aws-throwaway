@@ -2,17 +2,17 @@ mod instance_type;
 mod placement_strategy;
 
 use crate::{
-    backend::cli::instance_type::get_arch_of_instance_type, AwsBuilder, CleanupResources,
-    Ec2Instance, Ec2InstanceDefinition, IngressRestriction, InstanceOs, NetworkInterface,
-    APP_TAG_NAME, USER_TAG_NAME,
+    APP_TAG_NAME, AwsBuilder, CleanupResources, Ec2Instance, Ec2InstanceDefinition,
+    IngressRestriction, InstanceOs, NetworkInterface, USER_TAG_NAME,
+    backend::cli::instance_type::get_arch_of_instance_type,
 };
-use anyhow::{anyhow, Result};
-use futures::stream::FuturesUnordered;
+use anyhow::{Result, anyhow};
 use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 pub use instance_type::InstanceType;
 pub use placement_strategy::PlacementStrategy;
 use serde::Deserialize;
-use ssh_key::{rand_core::OsRng, PrivateKey};
+use ssh_key::{PrivateKey, rand_core::OsRng};
 use std::fmt::Write;
 use std::future::Future;
 use std::pin::Pin;
@@ -120,7 +120,6 @@ impl Aws {
     }
 
     pub(crate) async fn new(builder: AwsBuilder) -> Self {
-        std::env::set_var("AWS_DEFAULT_REGION", "us-east-1");
         let user_name = user_name().await;
         let keyname = format!("aws-throwaway-{user_name}-{}", Uuid::new_v4());
         let security_group_name = format!("aws-throwaway-{user_name}-{}", Uuid::new_v4());
@@ -350,7 +349,6 @@ impl Aws {
 
     /// Call to cleanup without constructing an [`Aws`]
     pub async fn cleanup_resources_static(cleanup: CleanupResources) {
-        std::env::set_var("AWS_DEFAULT_REGION", "us-east-1");
         let user_name = user_name().await;
         let tags = Tags { user_name, cleanup };
         Self::cleanup_resources_inner(&tags).await
@@ -827,6 +825,7 @@ async fn run_command<T: for<'a> Deserialize<'a>>(args: &[&str]) -> Result<T> {
 async fn run_command_string(args: &[&str]) -> Result<String> {
     let output = tokio::process::Command::new("aws")
         .args(args)
+        .env("AWS_DEFAULT_REGION", "us-east-1")
         .output()
         .await
         .unwrap();
