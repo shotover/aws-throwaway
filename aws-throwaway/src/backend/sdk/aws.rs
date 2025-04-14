@@ -1,7 +1,7 @@
 use super::tags::Tags;
+use crate::CleanupResources;
 use crate::ec2_instance::{Ec2Instance, NetworkInterface};
 use crate::ec2_instance_definition::{Ec2InstanceDefinition, InstanceOs};
-use crate::CleanupResources;
 use crate::{AwsBuilder, IngressRestriction};
 use anyhow::anyhow;
 use aws_config::meta::region::RegionProviderChain;
@@ -14,10 +14,10 @@ use aws_sdk_ec2::types::{
     Placement, ResourceType, Subnet, VolumeType,
 };
 use base64::Engine;
-use futures::stream::FuturesUnordered;
 use futures::StreamExt;
-use ssh_key::rand_core::OsRng;
+use futures::stream::FuturesUnordered;
 use ssh_key::PrivateKey;
+use ssh_key::rand_core::OsRng;
 use std::fmt::Write;
 use std::future::Future;
 use std::pin::Pin;
@@ -196,19 +196,21 @@ impl Aws {
         tags: &Tags,
         group_name: &str,
     ) {
-        assert!(client
-            .authorize_security_group_ingress()
-            .group_name(group_name)
-            .source_security_group_name(group_name)
-            .tag_specifications(
-                tags.create_tags(ResourceType::SecurityGroupRule, "within aws-throwaway SG")
-            )
-            .send()
-            .await
-            .map_err(|e| e.into_service_error())
-            .unwrap()
-            .r#return()
-            .unwrap());
+        assert!(
+            client
+                .authorize_security_group_ingress()
+                .group_name(group_name)
+                .source_security_group_name(group_name)
+                .tag_specifications(
+                    tags.create_tags(ResourceType::SecurityGroupRule, "within aws-throwaway SG")
+                )
+                .send()
+                .await
+                .map_err(|e| e.into_service_error())
+                .unwrap()
+                .r#return()
+                .unwrap()
+        );
         tracing::info!("created security group rule - internal");
     }
 
@@ -220,22 +222,24 @@ impl Aws {
         port: u16,
     ) {
         let port = port.to_string();
-        assert!(client
-            .authorize_security_group_ingress()
-            .group_name(group_name)
-            .ip_protocol("tcp")
-            .from_port(22)
-            .to_port(22)
-            .cidr_ip(cidr_ip)
-            .tag_specifications(
-                tags.create_tags(ResourceType::SecurityGroupRule, &format!("port {port}"))
-            )
-            .send()
-            .await
-            .map_err(|e| e.into_service_error())
-            .unwrap()
-            .r#return()
-            .unwrap());
+        assert!(
+            client
+                .authorize_security_group_ingress()
+                .group_name(group_name)
+                .ip_protocol("tcp")
+                .from_port(22)
+                .to_port(22)
+                .cidr_ip(cidr_ip)
+                .tag_specifications(
+                    tags.create_tags(ResourceType::SecurityGroupRule, &format!("port {port}"))
+                )
+                .send()
+                .await
+                .map_err(|e| e.into_service_error())
+                .unwrap()
+                .r#return()
+                .unwrap()
+        );
         tracing::info!("created security group rule - port {port}");
     }
 
@@ -434,9 +438,9 @@ impl Aws {
                     .await
                 {
                     tracing::info!(
-                    "placement group {name:?} could not be deleted, this will get cleaned up eventually on a future aws-throwaway cleanup: {:?}",
-                    err.into_service_error().meta().message()
-                )
+                        "placement group {name:?} could not be deleted, this will get cleaned up eventually on a future aws-throwaway cleanup: {:?}",
+                        err.into_service_error().meta().message()
+                    )
                 } else {
                     tracing::info!("placement group {name:?} was succesfully deleted")
                 }

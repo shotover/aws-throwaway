@@ -17,12 +17,12 @@ env:
 
 jobs:
   license_check:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     name: License Check
     steps:
       - uses: actions/checkout@v3
       - name: Install cargo deny
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny@0.15.1
+          tool: cargo-deny@0.18.2
       - run: cargo deny check licenses

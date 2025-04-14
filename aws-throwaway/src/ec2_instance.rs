@@ -1,6 +1,6 @@
-use crate::ssh::SshConnection;
 use crate::Aws;
-use anyhow::{anyhow, Context, Result};
+use crate::ssh::SshConnection;
+use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
@@ -127,12 +127,16 @@ TERM=xterm ssh -i key ubuntu@{} -o "UserKnownHostsFile known_hosts"
             {
                 Err(_) => {
                     // 1.
-                    tracing::info!("Timed out connecting to {connect_ip} over ssh, the host is probably not accessible yet, retrying");
+                    tracing::info!(
+                        "Timed out connecting to {connect_ip} over ssh, the host is probably not accessible yet, retrying"
+                    );
                     continue;
                 }
                 Ok(Err(e)) => {
                     // 2.
-                    tracing::info!("failed to connect to {connect_ip}:22, the host probably hasnt started their ssh service yet, retrying, error was {e}");
+                    tracing::info!(
+                        "failed to connect to {connect_ip}:22, the host probably hasnt started their ssh service yet, retrying, error was {e}"
+                    );
                     tokio::time::sleep_until(start + Duration::from_secs(1)).await;
                     continue;
                 }
@@ -147,7 +151,9 @@ TERM=xterm ssh -i key ubuntu@{} -o "UserKnownHostsFile known_hosts"
                     {
                         Err(err) => {
                             // 3.
-                            tracing::info!("Failed to make ssh connection to server, the host has probably not run its user-data script yet, retrying, error was: {err:?}");
+                            tracing::info!(
+                                "Failed to make ssh connection to server, the host has probably not run its user-data script yet, retrying, error was: {err:?}"
+                            );
                             tokio::time::sleep_until(start + Duration::from_secs(1)).await;
                             continue;
                         }
