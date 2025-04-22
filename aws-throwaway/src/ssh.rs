@@ -1,10 +1,9 @@
 use anyhow::{Result, anyhow};
-use async_trait::async_trait;
+use russh::keys::{PrivateKeyWithHashAlg, PublicKey, PublicKeyBase64};
 use russh::{
     ChannelMsg, Sig,
     client::{Config, Handle, Handler},
 };
-use russh_keys::{PublicKeyBase64, key::PublicKey};
 use std::{fmt::Display, io::Write, net::IpAddr, path::Path, sync::Arc, time::Duration};
 use tokio::{
     fs::File,
@@ -31,10 +30,6 @@ impl SshConnection {
             ..Default::default()
         };
 
-        let key = Arc::new(
-            russh_keys::decode_secret_key(client_private_key, None)
-                .map_err(|e| anyhow!(e).context("Failed to connect to ssh server"))?,
-        );
         let mut session = russh::client::connect_stream(
             Arc::new(config),
             stream,
@@ -43,7 +38,18 @@ impl SshConnection {
             },
         )
         .await?;
-        if session.authenticate_publickey("ubuntu", key).await.unwrap() {
+        let key = Arc::new(
+            russh::keys::decode_secret_key(client_private_key, None)
+                .map_err(|e| anyhow!(e).context("Failed to connect to ssh server"))?,
+        );
+        let key =
+            PrivateKeyWithHashAlg::new(key, session.best_supported_rsa_hash().await?.flatten());
+        if session
+            .authenticate_publickey("ubuntu", key)
+            .await
+            .unwrap()
+            .success()
+        {
             tracing::info!("Succesfully connected to {address} over ssh");
             Ok(SshConnection { session, address })
         } else {
@@ -359,7 +365,6 @@ struct Client {
     host_public_key_bytes: Vec<u8>,
 }
 
-#[async_trait]
 impl Handler for Client {
     type Error = anyhow::Error;
 
