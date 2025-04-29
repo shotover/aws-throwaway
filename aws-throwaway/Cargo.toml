@@ -17,15 +17,14 @@ aws-sdk-ec2 = { version = "1.1.0", optional = true }
 aws-sdk-iam = { version = "1.1.0", optional = true }
 aws-sdk-sts = { version = "1.1.0", optional = true }
 aws-config = { version = "1.0.0", optional = true }
-russh = "0.45.0"
-russh-keys = "0.45.0"
+russh = "0.51.0"
 base64 = "0.22.0"
 ssh-key = { version = "0.6.1", features = ["ed25519"] }
-tokio = { version = "1.25.0", features = ["fs"] }
+# "process" is only used for cli backend but cli backend has no feature, so currently no way to disable tokio process feature for aws sdk backend.
+tokio = { version = "1.25.0", features = ["fs", "process"] }
 anyhow = "1.0.42"
 uuid = { version = "1.0.0", features = ["serde", "v4"] }
 tracing = "0.1.15"
-async-trait = "0.1.30"
 serde = { version = "1.0.195", features = ["derive"] }
 serde_json = "1.0.111"
 futures = "0.3.30"
