@@ -67,7 +67,7 @@ impl Ec2Instance {
 
     /// Insert this into your known_hosts file to avoid errors due to unknown fingerprints
     pub fn openssh_known_hosts_line(&self) -> String {
-        format!("{} {}", &self.connect_ip, &self.host_public_key)
+        format!("{} ssh-ed25519 {}", &self.connect_ip, &self.host_public_key)
     }
 
     /// Returns an object that allows commands to be sent over ssh
