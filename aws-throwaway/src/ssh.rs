@@ -4,9 +4,16 @@ use russh::{
     ChannelMsg, Sig,
     client::{Config, Handle, Handler},
 };
-use russh_sftp::{client::SftpSession, protocol::OpenFlags};
+use russh_sftp::{
+    client::SftpSession,
+    protocol::{FileAttributes, OpenFlags},
+};
 use std::{fmt::Display, io::Write, net::IpAddr, path::Path, sync::Arc, time::Duration};
-use tokio::{fs::File, io::AsyncReadExt, net::TcpStream};
+use tokio::{
+    fs::File,
+    io::{AsyncRead, BufReader},
+    net::TcpStream,
+};
 
 pub struct SshConnection {
     address: IpAddr,
@@ -199,59 +206,46 @@ impl SshConnection {
     }
 
     /// Push a file from the local machine to the remote machine
+    /// The created file will have permissions 0o777
     pub async fn push_file(&self, source: &Path, dest: &Path) {
         let task = format!("pushing file from {source:?} to {}:{dest:?}", self.address);
         tracing::info!("{task}");
 
-        let channel = self.session.channel_open_session().await.unwrap();
-        channel.request_subsystem(true, "sftp").await.unwrap();
-        let sftp = SftpSession::new(channel.into_stream()).await.unwrap();
-        let mut file = sftp
-            .open_with_flags(
-                dest.to_str().unwrap(),
-                OpenFlags::WRITE | OpenFlags::TRUNCATE | OpenFlags::CREATE,
-            )
-            .await
-            .unwrap();
-
-        let mut source = File::open(source)
+        let source = File::open(source)
             .await
             .map_err(|e| anyhow!(e).context(format!("Failed to read from {source:?}")))
             .unwrap();
-
-        let mut bytes = vec![0u8; 1024 * 1024];
-        loop {
-            let read_count = source
-                .read(&mut bytes[..])
-                .await
-                .unwrap_or_else(|e| panic!("{task} failed to read from local disk with {e:?}"));
-            if read_count == 0 {
-                break;
-            }
-            tokio::io::AsyncWriteExt::write_all(&mut file, &bytes[0..read_count])
-                .await
-                .unwrap_or_else(|e| panic!("{task} failed to write to remote server with {e:?}"));
-        }
+        self.push_file_impl(&task, source, dest).await;
     }
 
     /// Create a file on the remote machine at `dest` with the provided bytes.
+    /// The created file will have permissions 0o777
     pub async fn push_file_from_bytes(&self, bytes: &[u8], dest: &Path) {
         let task = format!("pushing raw bytes to {}:{dest:?}", self.address);
         tracing::info!("{task}");
 
-        let channel = self.session.channel_open_session().await.unwrap();
-        channel.request_subsystem(true, "sftp").await.unwrap();
-        let sftp = SftpSession::new(channel.into_stream()).await.unwrap();
-        let mut file = sftp
-            .open_with_flags(
+        self.push_file_impl(&task, bytes, dest).await;
+    }
+
+    async fn push_file_impl(&self, task: &str, source: impl AsyncRead + Unpin, dest: &Path) {
+        let sftp = self.open_sftp_session().await;
+        let mut remote_file = sftp
+            .open_with_flags_and_attributes(
                 dest.to_str().unwrap(),
                 OpenFlags::WRITE | OpenFlags::TRUNCATE | OpenFlags::CREATE,
+                FileAttributes {
+                    permissions: Some(0o777),
+                    ..FileAttributes::empty()
+                },
             )
             .await
             .unwrap();
-        tokio::io::AsyncWriteExt::write_all(&mut file, bytes)
+
+        // By default tokio uses an 8KB buffer for reading, I've measured that manually swapping to a 1MB buffer increases performance by 5-10x
+        let mut source = BufReader::with_capacity(1024 * 1024, source);
+        tokio::io::copy_buf(&mut source, &mut remote_file)
             .await
-            .unwrap_or_else(|e| panic!("{task} failed to write to remote server with {e:?}"));
+            .unwrap_or_else(|e| panic!("{task} failed with {e:?}"));
     }
 
     /// Pull a file from the remote machine to the local machine
@@ -259,29 +253,23 @@ impl SshConnection {
         let task = format!("pulling file from {}:{source:?} to {dest:?}", self.address);
         tracing::info!("{task}");
 
-        let channel = self.session.channel_open_session().await.unwrap();
-        channel.request_subsystem(true, "sftp").await.unwrap();
-        let sftp = SftpSession::new(channel.into_stream()).await.unwrap();
-        let mut file = sftp.open(source.to_str().unwrap()).await.unwrap();
+        let sftp = self.open_sftp_session().await;
+        let remote_file = sftp.open(source.to_str().unwrap()).await.unwrap();
+        let mut remote_file = BufReader::with_capacity(1024 * 1024, remote_file);
 
         let mut dest = File::create(dest)
             .await
             .map_err(|e| anyhow!(e).context(format!("Failed to read from {source:?}")))
             .unwrap();
+        tokio::io::copy_buf(&mut remote_file, &mut dest)
+            .await
+            .unwrap_or_else(|e| panic!("{task} failed with {e:?}"));
+    }
 
-        let mut bytes = vec![0u8; 1024 * 1024];
-        loop {
-            let read_count = file
-                .read(&mut bytes[..])
-                .await
-                .unwrap_or_else(|e| panic!("{task} failed to read from local disk with {e:?}"));
-            if read_count == 0 {
-                break;
-            }
-            tokio::io::AsyncWriteExt::write_all(&mut dest, &bytes[0..read_count])
-                .await
-                .unwrap_or_else(|e| panic!("{task} failed to write to remote server with {e:?}"));
-        }
+    async fn open_sftp_session(&self) -> SftpSession {
+        let channel = self.session.channel_open_session().await.unwrap();
+        channel.request_subsystem(true, "sftp").await.unwrap();
+        SftpSession::new(channel.into_stream()).await.unwrap()
     }
 }
 
